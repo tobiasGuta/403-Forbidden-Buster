@@ -80,3 +80,18 @@ Results are displayed in a dedicated **"403 Buster"** tab.
 
 ## Disclaimer
 This tool is for educational purposes and authorized security testing only. Do not use this tool on systems you do not have permission to test. The author is not responsible for any misuse.
+
+# Support
+If my tool helped you land a bug bounty, consider buying me a coffee ☕️ as a small thank-you! Everything I build is free, but a little support helps me keep improving and creating more cool stuff ❤️
+---
+
+<div align="center">
+  <h3>☕ Support My Journey</h3>
+</div>
+
+
+<div align="center">
+  <a href="https://www.buymeacoffee.com/tobiasguta">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" width="200" />
+  </a>
+</div>
