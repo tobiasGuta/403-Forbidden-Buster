@@ -2,9 +2,7 @@
 
 **An Automated 403 Bypass Fuzzer for Burp Suite Community & Professional**
 
-![Java](https://img.shields.io/badge/Java-21-orange)
-![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Montoya%20API-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
+![Java](https://img.shields.io/badge/Java-ED8B00?style=for-the-badge&logo=java&logoColor=white) ![Burp Suite](https://img.shields.io/badge/Burp_Suite-FF6633?style=for-the-badge&logo=burpsuite&logoColor=white) ![Security](https://img.shields.io/badge/Cybersecurity-Bug_Bounty-red?style=for-the-badge)
 
 ## Overview
 **403 Forbidden Buster** is a Burp Suite extension designed to automate the process of bypassing `403 Forbidden` and `401 Unauthorized` endpoints.
