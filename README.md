@@ -59,7 +59,7 @@ Results are displayed in a dedicated **"403 Buster"** suite tab with a split int
 
 <img width="1908" height="819" alt="image" src="https://github.com/user-attachments/assets/189fd245-e0b7-490f-ba30-76aaad4c86e0" />
 
-## Results
+## Configuration
 
 <img width="1911" height="850" alt="image" src="https://github.com/user-attachments/assets/cbd87af7-2475-4616-a034-e27556c52d2e" />
 
