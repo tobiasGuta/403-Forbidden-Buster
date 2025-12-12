@@ -55,6 +55,10 @@ Results are displayed in a dedicated **"403 Buster"** suite tab with a split int
 * **Smart Persistence:** The extension automatically **saves your configuration**, preserving your custom wordlists and settings between Burp Suite restarts.
 * **Rate Limiting:** Includes a configurable **Request Delay Slider** (0ms - 1000ms). This allows you to slow down the attack to avoid triggering **429 Too Many Requests** or getting IP banned by aggressive WAFs like Cloudflare or Akamai.
 
+<img width="1908" height="819" alt="image" src="https://github.com/user-attachments/assets/189fd245-e0b7-490f-ba30-76aaad4c86e0" />
+
+<img width="1911" height="850" alt="image" src="https://github.com/user-attachments/assets/cbd87af7-2475-4616-a034-e27556c52d2e" />
+
 ## Installation
 
 ### Prerequisites
