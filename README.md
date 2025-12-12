@@ -13,13 +13,15 @@ Unlike Burp Intruder, this extension runs in its own thread pool, bypassing the 
 
 ## Features
 
+## Features
+
 ### 1. Automated Heuristic Fuzzing
 The extension attempts **100+ variations** of the original request using advanced evasion strategies:
 * **Header Poisoning:** Injects headers known to confuse reverse proxies (e.g., `X-Custom-IP-Authorization`, `X-Forwarded-For`, `X-Original-URL`) with trusted values like `127.0.0.1` and `localhost`.
 * **Protocol Downgrade:** Automatically attempts to downgrade the request to **HTTP/1.0**. This is a critical technique for bypassing WAFs and Load Balancers (like HAProxy/Nginx) that only apply strict rules to HTTP/1.1 traffic.
 * **Port & Protocol Spoofing:** Manipulates the `Host` header and connection properties to simulate internal administrative traffic.
 
-### 2. Proxy & Gateway Manipulation (New)
+### 2. Proxy & Gateway Manipulation
 * **Hop-by-Hop Header Abuse:** Leverages the HTTP `Connection` header to force intermediate proxies to **strip** critical access-control headers (e.g., `Cookie`, `Authorization`, `X-Forwarded-For`) before the request reaches the backend. This effectively makes the backend treat the request as "clean" or "internal."
 
 ### 3. Advanced Path & Obfuscation
@@ -41,13 +43,17 @@ The tool builds a dynamic list of Referer headers to bypass "Deep Linking" prote
 * **Self-Reference:** Sets the Referer to the current full URL.
 * **Root Reference:** Sets the Referer to the homepage.
 * **Directory Walking:** Automatically calculates parent directories from the current path.
-* **Dictionary Attack:** Tries common parents such as `/admin`, `/dashboard`, `/login`, and `/internal`.
+* **Dictionary Attack:** Uses the configurable wordlist to inject common parents (e.g., `/admin`, `/dashboard`) into the Referer header.
 
-### 7. Professional UI Dashboard
-Results are displayed in a dedicated **"403 Buster"** tab.
-* **Master-Detail View:** Clicking any result row instantly displays the full **Request** and **Response** in a split-pane editor.
-* **Filtering:** The tool only logs successful bypasses (non-403/401 statuses), keeping the view clean.
-* **Context Menu:** Right-click rows to **Delete Item** or **Clear History**.
+### 7. Tabbed Professional Dashboard
+Results are displayed in a dedicated **"403 Buster"** suite tab with a split interface:
+* **Monitor Tab:** A real-time table of results. Clicking any row instantly displays the full **Request** and **Response** in a split-pane editor.
+* **Configuration Tab:** A dedicated area to manage your wordlists and settings on the fly.
+
+### 8. Customization & Stealth (New)
+* **Fully Configurable Wordlists:** You can now edit the **IP Spoofing List** and **Path Dictionary** directly within the UI. Add custom internal IPs or specific paths you want to fuzz.
+* **Smart Persistence:** The extension automatically **saves your configuration**, preserving your custom wordlists and settings between Burp Suite restarts.
+* **Rate Limiting:** Includes a configurable **Request Delay Slider** (0ms - 1000ms). This allows you to slow down the attack to avoid triggering **429 Too Many Requests** or getting IP banned by aggressive WAFs like Cloudflare or Akamai.
 
 ## Installation
 
