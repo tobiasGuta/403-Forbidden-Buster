@@ -14,33 +14,36 @@ Unlike Burp Intruder, this extension runs in its own thread pool, bypassing the 
 ## Features
 
 ### 1. Automated Heuristic Fuzzing
-The extension attempts **75+ variations** of the original request using advanced evasion strategies:
+The extension attempts **100+ variations** of the original request using advanced evasion strategies:
 * **Header Poisoning:** Injects headers known to confuse reverse proxies (e.g., `X-Custom-IP-Authorization`, `X-Forwarded-For`, `X-Original-URL`) with trusted values like `127.0.0.1` and `localhost`.
 * **Protocol Downgrade:** Automatically attempts to downgrade the request to **HTTP/1.0**. This is a critical technique for bypassing WAFs and Load Balancers (like HAProxy/Nginx) that only apply strict rules to HTTP/1.1 traffic.
 * **Port & Protocol Spoofing:** Manipulates the `Host` header and connection properties to simulate internal administrative traffic.
 
-### 2. Advanced Path & Obfuscation
-Going beyond simple path traversal, the tool now includes complex encoding techniques:
+### 2. Proxy & Gateway Manipulation (New)
+* **Hop-by-Hop Header Abuse:** Leverages the HTTP `Connection` header to force intermediate proxies to **strip** critical access-control headers (e.g., `Cookie`, `Authorization`, `X-Forwarded-For`) before the request reaches the backend. This effectively makes the backend treat the request as "clean" or "internal."
+
+### 3. Advanced Path & Obfuscation
+Going beyond simple path traversal, the tool now includes complex encoding and normalization exploits:
+* **Case Switching:** Automatically toggles path casing (e.g., `/admin` -> `/ADMIN`) to bypass case-sensitive WAF rules, particularly effective against IIS and Java servers.
 * **Deep Obfuscation:** Uses **Double URL Encoding** (`%252e`) and **Unicode Variations** (`%ef%bc%8f`) to bypass normalization filters.
 * **Magic Suffixes & Extensions:** Appends "trusted" extensions and characters to the path (e.g., `.json`, `.css`, `;jsessionid=1337`, `?.png`) to trick ACLs into treating the request as a static resource.
-* **Path Manipulation:** Standard ACL trickery including dot-segments (`/./`, `/;`, `/..;/`) and capitalization exploits.
 
-### 3. Method Tampering & Overrides
+### 4. Method Tampering & Overrides
 * **Verb Switching:** Attempts to access the resource using alternate HTTP methods (`POST`, `TRACE`, `HEAD`).
 * **Method Overrides:** Automatically injects headers like `X-HTTP-Method-Override: GET` while sending a `POST` request, often bypassing GET-based blocking rules.
 
-### 4. Smart False Positive Detection
+### 5. Smart False Positive Detection
 * **Path Swapping:** When testing headers like `X-Original-URL`, the tool automatically swaps the request path to `/` (root) while placing the target path in the header.
 * **Baseline Comparison:** To prevent false positives where the server ignores the header and returns the homepage (200 OK), the tool compares the response length against a baseline request. If the content matches the homepage, the result is discarded.
 
-### 5. Dynamic Referer Generation
+### 6. Dynamic Referer Generation
 The tool builds a dynamic list of Referer headers to bypass "Deep Linking" protections:
 * **Self-Reference:** Sets the Referer to the current full URL.
 * **Root Reference:** Sets the Referer to the homepage.
 * **Directory Walking:** Automatically calculates parent directories from the current path.
 * **Dictionary Attack:** Tries common parents such as `/admin`, `/dashboard`, `/login`, and `/internal`.
 
-### 6. Professional UI Dashboard
+### 7. Professional UI Dashboard
 Results are displayed in a dedicated **"403 Buster"** tab.
 * **Master-Detail View:** Clicking any result row instantly displays the full **Request** and **Response** in a split-pane editor.
 * **Filtering:** The tool only logs successful bypasses (non-403/401 statuses), keeping the view clean.
