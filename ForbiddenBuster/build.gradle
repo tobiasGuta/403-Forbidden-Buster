@@ -1,0 +1,27 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.bughunter'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Standard Montoya API
+    compileOnly 'net.portswigger.burp.extensions:montoya-api:2023.12.1'
+}
+
+java {
+    toolchain {
+        // Using Java 21 as per your setup
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+jar {
+    // This names your final file "ForbiddenBuster.jar"
+    archiveFileName = 'ForbiddenBuster.jar'
+}
