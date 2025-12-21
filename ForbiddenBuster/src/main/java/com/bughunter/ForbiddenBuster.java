@@ -46,12 +46,16 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
     private JSlider rateLimitSlider;
     private JLabel rateLimitLabel;
     
-    // New UI Components
-    private JCheckBox chkHeaders;
+    // Toggles
+    private JCheckBox chkIpSpoofing;
+    private JCheckBox chkPathSwapping;
+    private JCheckBox chkHopByHop;
     private JCheckBox chkPathObf;
     private JCheckBox chkMethods;
+    private JCheckBox chkProtocolDowngrade;
     private JCheckBox chkSuffixes;
     private JCheckBox chkHide404;
+    
     private JSpinner threadSpinner;
 
     // Defaults
@@ -81,7 +85,7 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
     public void initialize(MontoyaApi api) {
         this.api = api;
         this.preferences = api.persistence().preferences();
-        api.extension().setName("403 Forbidden Buster (Platinum v6.1)");
+        api.extension().setName("403 Forbidden Buster (Platinum v6.3)");
 
         SwingUtilities.invokeLater(() -> {
             // --- TAB 1: MONITOR ---
@@ -98,7 +102,6 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
                 if (!e.getValueIsAdjusting()) {
                     int selectedRow = table.getSelectedRow();
                     if (selectedRow != -1) {
-                        // Convert view index to model index in case of sorting (if added later)
                         int modelRow = table.convertRowIndexToModel(selectedRow);
                         BypassResult result = tableModel.getResult(modelRow);
                         requestViewer.setRequest(result.requestResponse.request());
@@ -187,10 +190,13 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
             JLabel threadLabel = new JLabel("Concurrency (Threads):");
 
             // Toggles
-            chkHeaders = new JCheckBox("Enable Header Attacks", preferences.getBoolean("chkHeaders") == null || preferences.getBoolean("chkHeaders"));
-            chkPathObf = new JCheckBox("Enable Path Obfuscation", preferences.getBoolean("chkPathObf") == null || preferences.getBoolean("chkPathObf"));
-            chkMethods = new JCheckBox("Enable Method Tampering", preferences.getBoolean("chkMethods") == null || preferences.getBoolean("chkMethods"));
-            chkSuffixes = new JCheckBox("Enable Suffix Attacks", preferences.getBoolean("chkSuffixes") == null || preferences.getBoolean("chkSuffixes"));
+            chkIpSpoofing = new JCheckBox("IP Spoofing (Headers)", preferences.getBoolean("chkIpSpoofing") == null || preferences.getBoolean("chkIpSpoofing"));
+            chkPathSwapping = new JCheckBox("Path Swapping (X-Original-URL)", preferences.getBoolean("chkPathSwapping") == null || preferences.getBoolean("chkPathSwapping"));
+            chkHopByHop = new JCheckBox("Hop-By-Hop Headers", preferences.getBoolean("chkHopByHop") == null || preferences.getBoolean("chkHopByHop"));
+            chkPathObf = new JCheckBox("Path Obfuscation", preferences.getBoolean("chkPathObf") == null || preferences.getBoolean("chkPathObf"));
+            chkMethods = new JCheckBox("Method Tampering", preferences.getBoolean("chkMethods") == null || preferences.getBoolean("chkMethods"));
+            chkProtocolDowngrade = new JCheckBox("Protocol Downgrade", preferences.getBoolean("chkProtocolDowngrade") == null || preferences.getBoolean("chkProtocolDowngrade"));
+            chkSuffixes = new JCheckBox("Suffix Attacks", preferences.getBoolean("chkSuffixes") == null || preferences.getBoolean("chkSuffixes"));
             chkHide404 = new JCheckBox("Hide 404 Responses", preferences.getBoolean("chkHide404") != null && preferences.getBoolean("chkHide404"));
 
             // Layout Settings
@@ -200,20 +206,24 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
             gbc.gridx = 0; gbc.gridy = 1; settingsPanel.add(threadLabel, gbc);
             gbc.gridx = 1; gbc.gridy = 1; settingsPanel.add(threadSpinner, gbc);
 
-            gbc.gridx = 0; gbc.gridy = 2; settingsPanel.add(chkHeaders, gbc);
+            gbc.gridx = 0; gbc.gridy = 2; settingsPanel.add(chkIpSpoofing, gbc);
             gbc.gridx = 1; gbc.gridy = 2; settingsPanel.add(chkPathObf, gbc);
             
-            gbc.gridx = 0; gbc.gridy = 3; settingsPanel.add(chkMethods, gbc);
-            gbc.gridx = 1; gbc.gridy = 3; settingsPanel.add(chkSuffixes, gbc);
+            gbc.gridx = 0; gbc.gridy = 3; settingsPanel.add(chkPathSwapping, gbc);
+            gbc.gridx = 1; gbc.gridy = 3; settingsPanel.add(chkMethods, gbc);
             
-            gbc.gridx = 0; gbc.gridy = 4; settingsPanel.add(chkHide404, gbc);
+            gbc.gridx = 0; gbc.gridy = 4; settingsPanel.add(chkHopByHop, gbc);
+            gbc.gridx = 1; gbc.gridy = 4; settingsPanel.add(chkProtocolDowngrade, gbc);
+            
+            gbc.gridx = 0; gbc.gridy = 5; settingsPanel.add(chkSuffixes, gbc);
+            gbc.gridx = 1; gbc.gridy = 5; settingsPanel.add(chkHide404, gbc);
 
             JButton saveButton = new JButton("Save Configuration");
             saveButton.addActionListener(e -> {
                 saveSettings();
                 JOptionPane.showMessageDialog(null, "Settings Saved!");
             });
-            gbc.gridx = 0; gbc.gridy = 5; gbc.gridwidth = 2; gbc.fill = GridBagConstraints.HORIZONTAL;
+            gbc.gridx = 0; gbc.gridy = 6; gbc.gridwidth = 2; gbc.fill = GridBagConstraints.HORIZONTAL;
             settingsPanel.add(saveButton, gbc);
 
             configPanel.add(settingsPanel);
@@ -229,7 +239,7 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
         });
 
         api.userInterface().registerContextMenuItemsProvider(this);
-        api.logging().logToOutput("403 Buster Platinum v6.1 Loaded.");
+        api.logging().logToOutput("403 Buster Platinum v6.3 Loaded.");
     }
 
     private void saveSettings() {
@@ -237,9 +247,13 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
         preferences.setString("paths", pathConfigArea.getText());
         preferences.setString("delay", String.valueOf(rateLimitSlider.getValue()));
         preferences.setString("threads", String.valueOf(threadSpinner.getValue()));
-        preferences.setBoolean("chkHeaders", chkHeaders.isSelected());
+        
+        preferences.setBoolean("chkIpSpoofing", chkIpSpoofing.isSelected());
+        preferences.setBoolean("chkPathSwapping", chkPathSwapping.isSelected());
+        preferences.setBoolean("chkHopByHop", chkHopByHop.isSelected());
         preferences.setBoolean("chkPathObf", chkPathObf.isSelected());
         preferences.setBoolean("chkMethods", chkMethods.isSelected());
+        preferences.setBoolean("chkProtocolDowngrade", chkProtocolDowngrade.isSelected());
         preferences.setBoolean("chkSuffixes", chkSuffixes.isSelected());
         preferences.setBoolean("chkHide404", chkHide404.isSelected());
     }
@@ -281,8 +295,8 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
         ExecutorService attackExecutor = Executors.newFixedThreadPool(threadCount);
 
         try {
-            // 1. Headers + IP Spoofing
-            if (chkHeaders.isSelected()) {
+            // 1. IP Spoofing & Headers
+            if (chkIpSpoofing.isSelected()) {
                 for (String header : BYPASS_HEADERS) {
                     for (String ip : userIPs) {
                         attackExecutor.submit(() -> {
@@ -290,8 +304,23 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
                             sendAndLog(newReq, "Header: " + header + " val: " + ip, baseStatus, baseLength, delayMs, hide404);
                         });
                     }
-                    
-                    // Dictionary Path Swapping
+                    // Referer
+                    if (header.equalsIgnoreCase("Referer")) {
+                        List<String> refs = new ArrayList<>();
+                        refs.add(scheme + host + originalPath);
+                        for(String p : userPaths) refs.add(scheme + host + (p.startsWith("/") ? p : "/" + p));
+                        for (String refUrl : refs) {
+                            attackExecutor.submit(() -> 
+                                sendAndLog(originalRequest.withHeader(HttpHeader.httpHeader(header, refUrl)), "Referer: " + refUrl, baseStatus, baseLength, delayMs, hide404)
+                            );
+                        }
+                    }
+                }
+            }
+            
+            // 2. Path Swapping (X-Original-URL etc)
+            if (chkPathSwapping.isSelected()) {
+                for (String header : BYPASS_HEADERS) {
                     if (header.contains("URL") || header.contains("Rewrite")) {
                         attackExecutor.submit(() -> {
                             HttpRequest swapReq = originalRequest.withPath("/").withHeader(HttpHeader.httpHeader(header, originalPath));
@@ -306,21 +335,11 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
                             });
                         }
                     }
-                    
-                    // Referer
-                    if (header.equalsIgnoreCase("Referer")) {
-                        List<String> refs = new ArrayList<>();
-                        refs.add(scheme + host + originalPath);
-                        for(String p : userPaths) refs.add(scheme + host + (p.startsWith("/") ? p : "/" + p));
-                        for (String refUrl : refs) {
-                            attackExecutor.submit(() -> 
-                                sendAndLog(originalRequest.withHeader(HttpHeader.httpHeader(header, refUrl)), "Referer: " + refUrl, baseStatus, baseLength, delayMs, hide404)
-                            );
-                        }
-                    }
                 }
-                
-                // Hop-By-Hop
+            }
+            
+            // 3. Hop-By-Hop
+            if (chkHopByHop.isSelected()) {
                 List<String> hopHeaders = new ArrayList<>(BYPASS_HEADERS);
                 hopHeaders.add("Cookie"); hopHeaders.add("Authorization");
                 for (String hop : hopHeaders) {
@@ -330,7 +349,7 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
                 }
             }
 
-            // 2. Path Obfuscation
+            // 4. Path Obfuscation
             if (chkPathObf.isSelected()) {
                 for (String payload : PATH_OBFUSCATION) {
                     if (payload.startsWith("/")) {
@@ -349,30 +368,35 @@ public class ForbiddenBuster implements BurpExtension, ContextMenuItemsProvider 
                 }
             }
 
-            // 3. Method Tampering
+            // 5. Method Tampering
             if (chkMethods.isSelected()) {
                 attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("POST").withBody(""), "Method: POST", baseStatus, baseLength, delayMs, hide404));
                 attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("POST").withBody("").withHeader(HttpHeader.httpHeader("Content-Length", "0")), "Method: POST + CL:0", baseStatus, baseLength, delayMs, hide404));
                 attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("TRACE"), "Method: TRACE", baseStatus, baseLength, delayMs, hide404));
                 attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("HEAD"), "Method: HEAD", baseStatus, baseLength, delayMs, hide404));
                 attackExecutor.submit(() -> sendAndLog(originalRequest.withMethod("POST").withHeader(HttpHeader.httpHeader("X-HTTP-Method-Override", "GET")), "Method Override", baseStatus, baseLength, delayMs, hide404));
-                
-                // Protocol Downgrade
+            }
+            
+            // 6. Protocol Downgrade
+            if (chkProtocolDowngrade.isSelected()) {
                 attackExecutor.submit(() -> {
                     try {
                         String rawReq = originalRequest.toString();
-                        Pattern p = Pattern.compile("HTTP/\\d(\\.\\d)?");
+                        Pattern p = Pattern.compile("HTTP/\\d+(\\.\\d+)?");
                         Matcher m = p.matcher(rawReq);
                         if (m.find()) {
-                            String downgradedRaw = m.replaceFirst("HTTP/1.0");
-                            HttpRequest downgradedReq = HttpRequest.httpRequest(baseRequestResponse.httpService(), downgradedRaw);
-                            sendAndLog(downgradedReq, "Protocol: HTTP/1.0", baseStatus, baseLength, delayMs, hide404);
+                            List<String> versions = Arrays.asList("HTTP/0.9", "HTTP/1.0", "HTTP/1.1", "HTTP/2");
+                            for (String version : versions) {
+                                String modifiedRaw = m.replaceFirst(version);
+                                HttpRequest protoReq = HttpRequest.httpRequest(baseRequestResponse.httpService(), modifiedRaw);
+                                sendAndLog(protoReq, "Protocol: " + version, baseStatus, baseLength, delayMs, hide404);
+                            }
                         }
                     } catch (Exception e) {}
                 });
             }
 
-            // 4. Suffixes
+            // 7. Suffixes
             if (chkSuffixes.isSelected()) {
                 for (String suffix : SUFFIX_PAYLOADS) {
                     attackExecutor.submit(() -> 
