@@ -162,6 +162,8 @@ A **progress bar** shows real-time completion status during attacks.
 
 The **Length** column helps identify interesting responses — length anomalies across techniques often indicate partial bypasses or information disclosure.
 
+https://github.com/user-attachments/assets/5ec2debb-b10b-4e87-ad1b-41364e859cd4
+
 ---
 
 ## Disclaimer
