@@ -25,6 +25,10 @@ public class AttackConfig {
     private final boolean backslashBypass;
     private final boolean headerInjection;
 
+    // v8 safety profile. False means Safe Mode: only requests whose effective
+    // method is GET/HEAD/OPTIONS may be transmitted automatically.
+    private final boolean activeMethodsEnabled;
+
     // Scan settings
     private final int delayMs;
     private final int threadCount;
@@ -33,11 +37,28 @@ public class AttackConfig {
     private final List<String> userIPs;
     private final List<String> userPaths;
 
+    /**
+     * Backward-compatible constructor. v8 defaults to Safe Mode.
+     */
     public AttackConfig(boolean ipSpoofing, boolean pathSwapping, boolean hopByHop,
                         boolean pathObfuscation, boolean methodTampering, boolean protocolDowngrade,
                         boolean suffixAttacks, boolean hide404, boolean hide403,
                         boolean caseSwitch, boolean unicodeNormalization, boolean backslashBypass,
                         boolean headerInjection,
+                        int delayMs, int threadCount,
+                        String ipListRaw, String pathListRaw) {
+        this(ipSpoofing, pathSwapping, hopByHop, pathObfuscation, methodTampering,
+                protocolDowngrade, suffixAttacks, hide404, hide403, caseSwitch,
+                unicodeNormalization, backslashBypass, headerInjection,
+                false,
+                delayMs, threadCount, ipListRaw, pathListRaw);
+    }
+
+    public AttackConfig(boolean ipSpoofing, boolean pathSwapping, boolean hopByHop,
+                        boolean pathObfuscation, boolean methodTampering, boolean protocolDowngrade,
+                        boolean suffixAttacks, boolean hide404, boolean hide403,
+                        boolean caseSwitch, boolean unicodeNormalization, boolean backslashBypass,
+                        boolean headerInjection, boolean activeMethodsEnabled,
                         int delayMs, int threadCount,
                         String ipListRaw, String pathListRaw) {
         this.ipSpoofing = ipSpoofing;
@@ -53,6 +74,7 @@ public class AttackConfig {
         this.unicodeNormalization = unicodeNormalization;
         this.backslashBypass = backslashBypass;
         this.headerInjection = headerInjection;
+        this.activeMethodsEnabled = activeMethodsEnabled;
         this.delayMs = delayMs;
         this.threadCount = threadCount;
         this.userIPs = parseLines(ipListRaw);
@@ -101,6 +123,8 @@ public class AttackConfig {
     public boolean isUnicodeNormalization() { return unicodeNormalization; }
     public boolean isBackslashBypass() { return backslashBypass; }
     public boolean isHeaderInjection() { return headerInjection; }
+    public boolean isActiveMethodsEnabled() { return activeMethodsEnabled; }
+    public boolean isSafeMode() { return !activeMethodsEnabled; }
     public int getDelayMs() { return delayMs; }
     public int getThreadCount() { return threadCount; }
     public List<String> getUserIPs() { return userIPs; }
