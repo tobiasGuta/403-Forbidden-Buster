@@ -12,6 +12,10 @@ repositories {
 dependencies {
     compileOnly 'net.portswigger.burp.extensions:montoya-api:2026.7'
 
+    // Production keeps Montoya compile-only because Burp supplies it at runtime.
+    // UI/evidence tests instantiate classes whose signatures reference Montoya types,
+    // so the API is also needed on the test compile/runtime classpath.
+    testImplementation 'net.portswigger.burp.extensions:montoya-api:2026.7'
     testImplementation platform('org.junit:junit-bom:6.1.3')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
