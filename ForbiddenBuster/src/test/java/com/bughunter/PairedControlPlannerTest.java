@@ -1,10 +1,16 @@
 package com.bughunter;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class PairedControlPlannerTest {
+
+    @AfterEach
+    void resetActiveMethodsRegistry() {
+        ActiveMethodsRegistry.reset();
+    }
 
     @Test
     void exactProtectedTargetIsPreserved() {
@@ -97,5 +103,28 @@ class PairedControlPlannerTest {
 
         assertNotEquals(localhost, loopback);
         assertNotEquals(localhost, forwardedHost);
+    }
+
+    @Test
+    void safeRunModeDoesNotFollowLaterGlobalActiveModeChange() {
+        boolean capturedRunActiveMethods = false;
+
+        ActiveMethodsRegistry.configure(true, "POST");
+        assertTrue(RequestSafetyPolicy.isAllowedByCurrentMode("POST"));
+
+        assertFalse(PairedControlPlanner.isAllowedByRunMode("POST", capturedRunActiveMethods));
+        assertFalse(PairedControlPlanner.isAllowedByRunMode("DELETE", capturedRunActiveMethods));
+        assertTrue(PairedControlPlanner.isAllowedByRunMode("GET", capturedRunActiveMethods));
+    }
+
+    @Test
+    void activeRunModeDoesNotBecomeSafeWhenGlobalRegistryChangesLater() {
+        boolean capturedRunActiveMethods = true;
+
+        ActiveMethodsRegistry.configure(false, "GET");
+        assertFalse(RequestSafetyPolicy.isAllowedByCurrentMode("POST"));
+
+        assertTrue(PairedControlPlanner.isAllowedByRunMode("POST", capturedRunActiveMethods));
+        assertTrue(PairedControlPlanner.isAllowedByRunMode("DELETE", capturedRunActiveMethods));
     }
 }
