@@ -15,10 +15,15 @@ public class BypassResult {
     private final int status;
     private final int length;
     private final HttpRequestResponse requestResponse;
-    private final boolean interesting;
+    private final ResponseAnalyzer.ResultType classification;
+    private final int confidence;
+    private final double bodySimilarity;
+    private final String rationale;
 
     public BypassResult(int id, String method, String url, String technique, String category,
-                        int status, int length, HttpRequestResponse requestResponse, boolean interesting) {
+                        int status, int length, HttpRequestResponse requestResponse,
+                        ResponseAnalyzer.ResultType classification, int confidence,
+                        double bodySimilarity, String rationale) {
         this.id = id;
         this.method = method;
         this.url = url;
@@ -27,7 +32,10 @@ public class BypassResult {
         this.status = status;
         this.length = length;
         this.requestResponse = requestResponse;
-        this.interesting = interesting;
+        this.classification = classification;
+        this.confidence = confidence;
+        this.bodySimilarity = bodySimilarity;
+        this.rationale = rationale;
     }
 
     public int getId() { return id; }
@@ -38,5 +46,16 @@ public class BypassResult {
     public int getStatus() { return status; }
     public int getLength() { return length; }
     public HttpRequestResponse getRequestResponse() { return requestResponse; }
-    public boolean isInteresting() { return interesting; }
+    public ResponseAnalyzer.ResultType getClassification() { return classification; }
+    public int getConfidence() { return confidence; }
+    public double getBodySimilarity() { return bodySimilarity; }
+    public String getRationale() { return rationale; }
+
+    /**
+     * High-signal rows are candidates or redirects, never automatically confirmed vulnerabilities.
+     */
+    public boolean isInteresting() {
+        return classification == ResponseAnalyzer.ResultType.BYPASS_CANDIDATE
+                || classification == ResponseAnalyzer.ResultType.REDIRECT;
+    }
 }
