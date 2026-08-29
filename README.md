@@ -117,7 +117,7 @@ Tests request-version mutations. Protocol behavior should still be manually vali
 Tests file-extension, query, fragment-style, and path-suffix variations.
 
 ### 11. Header Injection / Routing Hints
-Tests forwarding scheme/port headers, Host variants, content types, Accept variants, and related routing hints. The current category also contains POST-based Content-Type variants, so the whole category is gated behind Active Methods until the generator is split into safe and active subfamilies.
+Tests forwarding scheme/port headers, Host variants, content types, Accept variants, and related routing hints. The current category also contains POST-based Content-Type variants, so the whole category is gated behind Active Methods until the generator is split into safe and active subfamilies. This is a conservative safety choice, not a claim that every header mutation is state-changing.
 
 ---
 
