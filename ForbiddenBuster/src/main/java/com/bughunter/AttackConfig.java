@@ -6,11 +6,12 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Immutable configuration holder for an attack run. Includes input validation.
+ * Immutable configuration holder for an attack run. Includes input validation
+ * and the v8 Safe Mode policy.
  */
 public class AttackConfig {
 
-    // Toggle states
+    // Requested toggle states
     private final boolean ipSpoofing;
     private final boolean pathSwapping;
     private final boolean hopByHop;
@@ -25,9 +26,9 @@ public class AttackConfig {
     private final boolean backslashBypass;
     private final boolean headerInjection;
 
-    // v8 safety profile. False means Safe Mode: only requests whose effective
-    // method is GET/HEAD/OPTIONS may be transmitted automatically.
+    // v8 safety profile. False means Safe Mode.
     private final boolean activeMethodsEnabled;
+    private final String targetMethod;
 
     // Scan settings
     private final int delayMs;
@@ -38,7 +39,7 @@ public class AttackConfig {
     private final List<String> userPaths;
 
     /**
-     * Backward-compatible constructor. v8 defaults to Safe Mode.
+     * Backward-compatible constructor. v8 defaults to Safe Mode on a GET target.
      */
     public AttackConfig(boolean ipSpoofing, boolean pathSwapping, boolean hopByHop,
                         boolean pathObfuscation, boolean methodTampering, boolean protocolDowngrade,
@@ -50,7 +51,24 @@ public class AttackConfig {
         this(ipSpoofing, pathSwapping, hopByHop, pathObfuscation, methodTampering,
                 protocolDowngrade, suffixAttacks, hide404, hide403, caseSwitch,
                 unicodeNormalization, backslashBypass, headerInjection,
-                false,
+                false, "GET",
+                delayMs, threadCount, ipListRaw, pathListRaw);
+    }
+
+    /**
+     * Compatibility constructor for callers that already opt into Active Methods.
+     */
+    public AttackConfig(boolean ipSpoofing, boolean pathSwapping, boolean hopByHop,
+                        boolean pathObfuscation, boolean methodTampering, boolean protocolDowngrade,
+                        boolean suffixAttacks, boolean hide404, boolean hide403,
+                        boolean caseSwitch, boolean unicodeNormalization, boolean backslashBypass,
+                        boolean headerInjection, boolean activeMethodsEnabled,
+                        int delayMs, int threadCount,
+                        String ipListRaw, String pathListRaw) {
+        this(ipSpoofing, pathSwapping, hopByHop, pathObfuscation, methodTampering,
+                protocolDowngrade, suffixAttacks, hide404, hide403, caseSwitch,
+                unicodeNormalization, backslashBypass, headerInjection,
+                activeMethodsEnabled, "GET",
                 delayMs, threadCount, ipListRaw, pathListRaw);
     }
 
@@ -58,7 +76,7 @@ public class AttackConfig {
                         boolean pathObfuscation, boolean methodTampering, boolean protocolDowngrade,
                         boolean suffixAttacks, boolean hide404, boolean hide403,
                         boolean caseSwitch, boolean unicodeNormalization, boolean backslashBypass,
-                        boolean headerInjection, boolean activeMethodsEnabled,
+                        boolean headerInjection, boolean activeMethodsEnabled, String targetMethod,
                         int delayMs, int threadCount,
                         String ipListRaw, String pathListRaw) {
         this.ipSpoofing = ipSpoofing;
@@ -75,6 +93,7 @@ public class AttackConfig {
         this.backslashBypass = backslashBypass;
         this.headerInjection = headerInjection;
         this.activeMethodsEnabled = activeMethodsEnabled;
+        this.targetMethod = targetMethod == null ? "" : targetMethod.trim();
         this.delayMs = delayMs;
         this.threadCount = threadCount;
         this.userIPs = parseLines(ipListRaw);
@@ -90,14 +109,22 @@ public class AttackConfig {
             errors.add("Request Delay must be between 0ms and 10000ms.");
         if (threadCount < 1 || threadCount > 50)
             errors.add("Thread count must be between 1 and 50.");
-        if (userIPs.isEmpty() && ipSpoofing)
+        if (userIPs.isEmpty() && isIpSpoofing())
             errors.add("IP Spoofing is enabled but the IP list is empty.");
 
-        boolean anyEnabled = ipSpoofing || pathSwapping || hopByHop || pathObfuscation
-                || methodTampering || protocolDowngrade || suffixAttacks || caseSwitch
-                || unicodeNormalization || backslashBypass || headerInjection;
+        if (isSafeMode() && !RequestSafetyPolicy.isSafeAutomaticMethod(targetMethod)) {
+            errors.add("Safe Mode will not transmit a " + targetMethod
+                    + " target. Enable Active Methods explicitly for non-GET/HEAD/OPTIONS requests.");
+        }
+
+        boolean anyEnabled = isIpSpoofing() || isPathSwapping() || isHopByHop()
+                || isPathObfuscation() || isMethodTampering() || isProtocolDowngrade()
+                || isSuffixAttacks() || isCaseSwitch() || isUnicodeNormalization()
+                || isBackslashBypass() || isHeaderInjection();
         if (!anyEnabled)
-            errors.add("At least one attack technique must be enabled.");
+            errors.add(isSafeMode()
+                    ? "No Safe Mode techniques are enabled. Method Tampering and Header Injection require Active Methods."
+                    : "At least one attack technique must be enabled.");
         return errors;
     }
 
@@ -109,22 +136,37 @@ public class AttackConfig {
                 .collect(Collectors.toList());
     }
 
-    // --- Getters ---
-    public boolean isIpSpoofing() { return ipSpoofing; }
-    public boolean isPathSwapping() { return pathSwapping; }
-    public boolean isHopByHop() { return hopByHop; }
-    public boolean isPathObfuscation() { return pathObfuscation; }
-    public boolean isMethodTampering() { return methodTampering; }
-    public boolean isProtocolDowngrade() { return protocolDowngrade; }
-    public boolean isSuffixAttacks() { return suffixAttacks; }
+    private boolean targetAllowedByMode() {
+        return activeMethodsEnabled || RequestSafetyPolicy.isSafeAutomaticMethod(targetMethod);
+    }
+
+    // --- Effective technique getters consumed by PayloadGenerator ---
+    public boolean isIpSpoofing() { return ipSpoofing && targetAllowedByMode(); }
+    public boolean isPathSwapping() { return pathSwapping && targetAllowedByMode(); }
+    public boolean isHopByHop() { return hopByHop && targetAllowedByMode(); }
+    public boolean isPathObfuscation() { return pathObfuscation && targetAllowedByMode(); }
+
+    // These categories currently contain non-GET/HEAD/OPTIONS requests. Keep them
+    // completely out of Safe Mode until the generator is split into safe/active subfamilies.
+    public boolean isMethodTampering() {
+        return methodTampering && activeMethodsEnabled && targetAllowedByMode();
+    }
+
+    public boolean isProtocolDowngrade() { return protocolDowngrade && targetAllowedByMode(); }
+    public boolean isSuffixAttacks() { return suffixAttacks && targetAllowedByMode(); }
     public boolean isHide404() { return hide404; }
     public boolean isHide403() { return hide403; }
-    public boolean isCaseSwitch() { return caseSwitch; }
-    public boolean isUnicodeNormalization() { return unicodeNormalization; }
-    public boolean isBackslashBypass() { return backslashBypass; }
-    public boolean isHeaderInjection() { return headerInjection; }
+    public boolean isCaseSwitch() { return caseSwitch && targetAllowedByMode(); }
+    public boolean isUnicodeNormalization() { return unicodeNormalization && targetAllowedByMode(); }
+    public boolean isBackslashBypass() { return backslashBypass && targetAllowedByMode(); }
+
+    public boolean isHeaderInjection() {
+        return headerInjection && activeMethodsEnabled && targetAllowedByMode();
+    }
+
     public boolean isActiveMethodsEnabled() { return activeMethodsEnabled; }
     public boolean isSafeMode() { return !activeMethodsEnabled; }
+    public String getTargetMethod() { return targetMethod; }
     public int getDelayMs() { return delayMs; }
     public int getThreadCount() { return threadCount; }
     public List<String> getUserIPs() { return userIPs; }
