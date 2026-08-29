@@ -9,7 +9,7 @@
 
 When a security professional encounters a restricted page (for example `/admin` or `/api/private`), manually testing every bypass technique is time-consuming. This extension allows the user to right-click the captured Burp request and launch a background scan using common bypass heuristics while preserving the original request context.
 
-Version 8 is accuracy- and safety-focused. A status change alone is not treated as proof of an authorization bypass. Results are compared with calibrated denied baselines, neutral paired controls where appropriate, and safe repeatability checks for high-signal GET candidates. Safe Mode is the default execution profile; non-GET/HEAD/OPTIONS request families require a per-target Active Methods opt-in.
+Version 8 is accuracy-, safety-, and evidence-focused. A status change alone is not treated as proof of an authorization bypass. Results are compared with calibrated denied baselines, neutral paired controls where appropriate, Burp-native semantic response evidence, and safe repeatability checks for high-signal GET candidates. Safe Mode is the default execution profile; non-GET/HEAD/OPTIONS request families require a per-target Active Methods opt-in.
 
 ---
 
@@ -18,15 +18,16 @@ Version 8 is accuracy- and safety-focused. A status change alone is not treated 
 * **Safe Mode by Default:** Automatic transmission is limited to GET/HEAD/OPTIONS technique families. Non-allowlisted methods are gated behind an explicit per-target confirmation and are never persisted as the default.
 * **Safe Header Injection Coverage:** Forwarding, Host, Accept, and related header-only mutations remain available in Safe Mode, while POST Content-Type variants are filtered before queueing unless Active Methods is explicitly enabled.
 * **Calibrated Baselines:** Safe GET targets are replayed before fuzzing to learn normal response variance and reject stale authorization baselines.
-* **Paired Differential Controls:** Target-preserving `X-Original-URL` and `X-Rewrite-URL` path swaps are compared with the same visible request minus the routing mutation so a normal root-page `200` is not mistaken for a bypass.
+* **Paired Differential Controls:** Target-preserving path swaps and selected Host/routing mutations are evaluated against neutral controls so public carrier pages, catch-all routes, and default virtual hosts are not mistaken for protected-resource access.
 * **Semantic-Target Guard:** Dictionary path swaps that point at a different resource are skipped instead of being scored as target bypasses.
+* **Burp-Native Semantic Evidence:** Montoya response-variation and keyword analyzers track semantic attributes and denial-keyword count changes that move outside the calibrated baseline profile. This evidence supplements, but never independently promotes, the custom bypass classifier.
+* **Location-Aware Redirect Triage:** Redirect destinations are normalized and compared explicitly. Identical candidate/control redirects are suppressible as `CONTROL_MATCH`, while login/authentication/denial redirects remain low-confidence manual-inspection signals.
 * **Safe Candidate Revalidation:** High-signal GET candidates are replayed twice. Only a stable `3/3` result retains `BYPASS_CANDIDATE`; paired-control techniques receive a fresh neutral control on every replay.
-* **Evidence-Based Classification:** Status, method semantics, normalized body similarity, denial markers, body length, paired-control differences, and repeatability contribute to candidate confidence.
+* **Evidence-Based Classification:** Status, method semantics, normalized body similarity, denial markers, body length, paired-control differences, repeatability, and supplemental Burp-native semantic evidence are surfaced for triage.
+* **Evidence-First Burp UI:** Classification, confidence, baseline/control similarity, repeatability, exact candidate/control traffic, and rationale are visible without treating every `2xx` as a bypass.
 * **Attack Controls:** Pause, resume, and stop attacks on demand. Queued workers respect pause, and Stop acts as a send barrier.
-* **Progress Bar:** Real-time completion tracking for long-running scans.
-* **CSV Export:** Export the results table to CSV for reporting and further analysis.
+* **Evidence-Rich CSV Export:** Export classification, confidence, similarities, repeatability, and rationales for reporting and further analysis.
 * **Global Rate Limiting:** Enforced across baseline calibration, paired controls, candidate revalidation, and attack requests.
-* **Native Burp UI:** Split-pane Request/Response editors for manual validation.
 * **Persistent Configuration:** Ordinary scan settings are saved across Burp restarts. Active Methods permission is intentionally not persisted.
 
 ---
@@ -38,16 +39,17 @@ The extension follows a modular architecture with clean separation of concerns:
 | File | Responsibility |
 | :--- | :--- |
 | `ForbiddenBuster.java` | Entry point — registers extension, tab, Safe/Active context-menu actions, unload handler |
-| `BusterUI.java` | Swing UI, event handling, persistence, CSV export, result table |
-| `AttackEngine.java` | Baseline calibration, paired-control execution, safe candidate revalidation, thread management, pause/resume/stop, global rate limiting |
+| `BusterUI.java` | Evidence-first Swing UI, persistence, candidate/control viewers, CSV export, result table |
+| `AttackEngine.java` | Baseline calibration, paired-control execution, Montoya semantic evidence, safe candidate revalidation, traffic controls, global rate limiting |
 | `AttackConfig.java` | Immutable configuration plus effective Safe Mode technique gates |
 | `ActiveMethodsRegistry.java` | Stores the current target's ephemeral Safe/Active execution choice; never persisted |
 | `RequestSafetyPolicy.java` | Central GET/HEAD/OPTIONS method allowlist and execution-mode decision |
 | `BypassResult.java` | Stores candidate evidence, classification, confidence, paired-control evidence, and repeatability metadata |
 | `PayloadGenerator.java` | Generates bypass payloads from the effective technique configuration |
-| `PairedControlPlanner.java` | Final pre-queue Safe Mode gate plus semantic-target and neutral-control planning |
+| `PairedControlPlanner.java` | Final pre-queue Safe Mode gate plus semantic-target, path-swap, and Host/routing control planning |
 | `CandidateRevalidation.java` | Scores safe replay consistency and adjusts candidate classification/confidence based on repeatability |
-| `ResponseAnalyzer.java` | Baseline/control differential analysis and false-positive reduction |
+| `MontoyaResponseEvidence.java` | Caches the calibrated Burp-native semantic baseline profile and records response-variation/keyword evidence |
+| `ResponseAnalyzer.java` | Authoritative custom baseline/control scorer, body normalization, redirect `Location` comparison, and false-positive reduction |
 
 ---
 
@@ -79,6 +81,8 @@ Active Methods permission applies only to the currently selected target and is i
 
 ### 1. IP Spoofing & Header Poisoning
 Tests common proxy and client-IP headers such as `X-Forwarded-For`, `X-Custom-IP-Authorization`, `CF-Connecting-IP`, `True-Client-IP`, and `Forwarded` with configurable trusted-looking values.
+
+Selected host-routing headers such as `X-Forwarded-Host`, `X-Host`, `X-Original-Host`, `X-Backend-Host`, and `X-Forwarded-Server` receive routing-surface paired controls when their values are mutated.
 
 ### 2. Path Swapping
 Tests target-preserving `X-Original-URL` and `X-Rewrite-URL` routing behavior while changing the visible path to `/`.
@@ -124,6 +128,8 @@ Tests forwarding scheme/port headers, Host variants, content types, Accept varia
 
 In Safe Mode, header-only requests that preserve `GET`, `HEAD`, or `OPTIONS` can run normally. The four POST + Content-Type mutations are rejected by the final pre-queue method gate. In Active Methods mode, those POST variants become eligible as well.
 
+Direct `Host` mutations are compared on the same mutated routing surface against a deterministic synthetic non-target path. If both the protected target and synthetic control produce the same generic/default-vhost response, the result is suppressed as `CONTROL_MATCH` rather than treated as authorization evidence.
+
 ---
 
 ## v8 Accuracy Model
@@ -135,10 +141,42 @@ For a captured GET request returning `401` or `403`, the extension sends two unc
 
 Dynamic response values such as long numeric IDs, UUIDs, timestamps, and long hexadecimal values are normalized before body similarity comparison.
 
+The same accepted baseline responses are also used to build a cached Burp-native semantic profile. This does **not** add extra baseline requests beyond the existing calibration traffic.
+
 ### Paired controls
-For supported mutations that intentionally change the visible request target, v8 sends a neutral paired control that preserves the same visible request while removing or restoring only the routing mutation. This helps distinguish a real routing differential from the normal response of the visible path.
+For supported mutations that can otherwise change the apparent resource or routing surface, v8 uses a paired control designed around the mutation family.
+
+For `X-Original-URL` / `X-Rewrite-URL`, the control preserves the visible carrier path while removing or restoring only the routing mutation. For selected Host/routing mutations, the exact routing mutation is preserved while the protected path is replaced with a deterministic synthetic non-target path. This makes generic virtual-host or catch-all behavior directly measurable.
 
 For paired-control candidates, repeatability testing refreshes the neutral control before every candidate replay. A replay therefore counts only when the **differential itself** remains present.
+
+### Burp-native semantic evidence
+Version 8 also uses Montoya's response variation and keyword analyzers as a supplemental evidence layer.
+
+The semantic baseline is built from the captured denied response plus the accepted live calibration responses. Stable/invariant response attributes are learned first. When a candidate is analyzed, v8 reports selected attributes only when the candidate causes an attribute that was stable across the denied baseline to vary. Relevant attributes include status, content type/length, body or visible-text characteristics, word counts, page title, `Location`, `Content-Location`, header/cookie names, ETag, and Last-Modified.
+
+A denial-keyword analyzer follows the same philosophy for terms such as `forbidden`, `access denied`, `unauthorized`, and `permission denied`: normal baseline variation is not treated as new evidence, but a count that moves outside the stable baseline profile is recorded.
+
+When a paired control exists, candidate/control semantic variations are also recorded. This evidence is appended to the Evidence view and exported rationale.
+
+**Important:** the Montoya semantic layer is supplemental. It does not independently create or promote a `BYPASS_CANDIDATE`. The custom baseline/control scorer and repeatability rules remain authoritative.
+
+### Redirect `Location` comparison
+Redirects are no longer triaged primarily from status and body length. The `Location` header is explicitly normalized and compared.
+
+Normalization lowercases scheme/host, removes default HTTP/HTTPS ports, drops URL fragments, preserves raw query encoding, and keeps meaningful query differences intact.
+
+Redirect behavior follows these rules:
+
+| Redirect evidence | v8 treatment |
+| :--- | :--- |
+| Candidate and paired control return the same 3xx status and equivalent non-empty `Location` | `CONTROL_MATCH`, confidence `0`, suppressed |
+| Candidate redirects to login/authentication/denial-like destination | `REDIRECT`, confidence capped at `15` |
+| Redirect has no usable `Location` | `REDIRECT`, confidence capped at `20` |
+| Candidate and control redirect to materially different destinations | Retain `REDIRECT` and add modest differential confidence |
+| Control is auth/denial-like but candidate redirects elsewhere | Retain `REDIRECT` with additional manual-inspection signal |
+
+A redirect is **never automatically promoted to `BYPASS_CANDIDATE`** by this logic. It remains a manual-inspection signal because the redirect destination still has to be validated in context.
 
 ### Candidate repeatability
 A high-signal `GET` candidate is automatically replayed twice after its initial response:
@@ -170,8 +208,8 @@ Results can be classified as:
 | Classification | Meaning |
 | :--- | :--- |
 | `BYPASS_CANDIDATE` | Strong differential evidence; safe GET candidates must also survive automatic repeatability checks |
-| `CONTROL_MATCH` | Mutation matched its neutral paired control and is suppressed as likely noise |
-| `REDIRECT` | Denied baseline changed to 3xx; redirect destination requires inspection |
+| `CONTROL_MATCH` | Mutation matched its neutral paired control, including equivalent redirect destinations, and is suppressed as likely noise |
+| `REDIRECT` | Denied baseline changed to 3xx; `Location` is triaged but the destination still requires manual authorization validation |
 | `METHOD_BEHAVIOR` | Success response came from a method whose semantics commonly differ |
 | `BODY_ANOMALY` | Same status but materially different response body |
 | `LENGTH_ANOMALY` | Same status but response length falls outside calibrated baseline variance |
@@ -213,7 +251,7 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 2. In **Proxy → HTTP History**, right-click the request.
 3. Choose **`Bypass 403 Forbidden (Safe Mode)`** for the normal scan. Use **`Active Methods...`** only when the additional request methods are appropriate for the authorized target and confirm the warning.
 4. Open the **403 Buster** tab and click **Run Attack**.
-5. Review candidate requests and responses manually. A high-confidence candidate is not automatically a confirmed authorization bypass.
+5. Review candidate requests, paired controls, and Evidence rationale manually. A high-confidence candidate is not automatically a confirmed authorization bypass.
 
 ---
 
@@ -225,7 +263,7 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 | **Pause / Resume** | Stops workers before transmission without discarding scan state |
 | **Stop** | Prevents interrupted/rate-limited workers from continuing into new sends |
 | **Clear Results** | Clears the results table |
-| **Export CSV** | Exports visible results |
+| **Export Evidence CSV** | Exports visible evidence-rich results |
 
 ---
 
@@ -241,7 +279,7 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 
 ## Manual Validation
 
-A `BYPASS_CANDIDATE` means the response has enough differential and repeatability evidence to justify manual inspection. Automated repeatability still does **not** prove that the response exposes the intended protected resource, data, or action. Before reporting a vulnerability, validate those protected semantics manually and remain within the authorized testing scope.
+A `BYPASS_CANDIDATE` means the response has enough differential and repeatability evidence to justify manual inspection. Burp-native semantic variation and automated repeatability still do **not** prove that the response exposes the intended protected resource, data, or action. Before reporting a vulnerability, validate those protected semantics manually and remain within the authorized testing scope.
 
 ---
 
