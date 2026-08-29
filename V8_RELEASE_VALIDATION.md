@@ -9,16 +9,20 @@ This file records the manual release validation performed for the v8 accuracy/sa
 | Branch | `feat/v8-accuracy-engine` |
 | Originally tested source commit | `800b359234888c6019c538961fb25bd4289b5d10` |
 | Originally tested JAR SHA-256 | `6444de5fdfc7cc0c0e336ff4305680b01a9a618cbfb0ab23f367900813de1ccb` |
-| Provenance artifact | `ForbiddenBuster-v8-800b359234888c6019c538961fb25bd4289b5d10` |
-| Artifact ZIP SHA-256 | `a48ac1bbd4f10ea893b07ce48f6d79f1a3acf7fde290577a1aaa2317bbd25fe9` |
+| Original provenance artifact | `ForbiddenBuster-v8-800b359234888c6019c538961fb25bd4289b5d10` |
+| Original artifact ZIP SHA-256 | `a48ac1bbd4f10ea893b07ce48f6d79f1a3acf7fde290577a1aaa2317bbd25fe9` |
+| Post-review tested head | `dfdf91ea0b92658b979bd1504df9f0c779abae0a` |
+| Post-review tested JAR SHA-256 | `a2dd99e7910d598a1f42e536de14dee2563ff1f20535906188eb55f87deb62be` |
+| Post-review artifact | `ForbiddenBuster-v8-dfdf91ea0b92658b979bd1504df9f0c779abae0a` |
+| Post-review artifact ZIP SHA-256 | `ac583a045cbd3caae06e1611890b2274ef55eaf34edd398f063b31cda68e1262` |
 | Burp | Community Edition `v2026.7.3` |
 | Build/CI Java | Java 17 |
 | Test date | `2026-08-29` |
 | Tester | `tobiasGuta` |
 | Test target | Disposable local Docker smoke-test lab |
-| Original manual verdict | **PASS** |
+| Final manual verdict | **PASS** |
 
-The exact originally tested code commit passed GitHub Actions CI run **#134** before manual validation. The first validation-record commits were documentation-only.
+The exact originally tested code commit passed GitHub Actions CI run **#134** before manual validation. The post-review isolation-fix artifact tested manually also passed GitHub Actions CI run **#146** before the targeted retest.
 
 ## Manual validation summary
 
@@ -97,22 +101,48 @@ No release-blocking behavior was observed during the original manual validation:
 - **No candidate/evidence/CSV mismatch was observed in the final sanity check**.
 - **No unhandled extension exception was observed on the normal smoke-test path**.
 
-## Post-review Safe Mode isolation fix
+## Post-review Safe Mode isolation fix — PASS
 
 A final code review after the original manual PASS identified a per-run isolation issue: `PairedControlPlanner` consulted the mutable global `ActiveMethodsRegistry` while an attack was executing. In a narrow race, selecting **Active Methods** for another target while an existing Safe Mode run was still calibrating could have changed the final method gate seen by that already-running scan.
 
 The fix binds planner safety decisions to the immutable `AttackConfig` mode captured when the run starts:
 
-- `PairedControlPlanner.plan(...)` now requires the captured `activeMethodsEnabled` value.
-- `AttackEngine` passes `config.isActiveMethodsEnabled()` both during payload filtering and again inside the worker before transmission.
+- `PairedControlPlanner.plan(...)` requires the captured `activeMethodsEnabled` value.
+- `AttackEngine` passes `config.isActiveMethodsEnabled()` during payload filtering and again inside the worker before transmission.
 - The planner no longer consults `ActiveMethodsRegistry` during execution.
-- Regression tests verify that a Safe Mode run remains Safe even if the global registry later changes to Active Methods, and that an Active run likewise keeps its captured mode if the registry later changes back.
+- Regression tests verify that a Safe Mode run remains Safe if the global registry later changes to Active Methods, and that an Active run keeps its captured mode if the registry later changes back.
 
-Post-review fix head before this documentation update: `068b727bc2fecf5c7c0494339f0be683e0ff04b7`.
+Code-fix head: `068b727bc2fecf5c7c0494339f0be683e0ff04b7`. GitHub Actions CI run **#144** passed.
 
-GitHub Actions CI run **#144** completed successfully: test/build, artifact provenance, and artifact upload all passed.
+The exact post-review artifact used for the targeted manual retest was built from `dfdf91ea0b92658b979bd1504df9f0c779abae0a`; GitHub Actions CI run **#146** passed before the retest.
 
-Because this fix changes a release-blocking safety boundary, one **targeted manual mode-switch isolation retest** is still required before merge. The full original smoke suite does not need to be repeated.
+### Targeted mode-switch isolation retest
+
+Configuration:
+
+- Target A: `GET /admin-active-methods` selected in **Safe Mode**.
+- Header Injection only.
+- Request delay: `2000 ms`.
+- Threads: `1`.
+- While Target A was still running, Target B `GET /admin-route` was selected through **Active Methods...** and the warning was accepted. Target B was not launched as another attack.
+
+Output ordering confirmed the intended race window was exercised:
+
+```text
+[403 Buster] Calibrating baseline with 2 live replay(s)...
+[403 Buster] Baseline calibrated: 3 stable sample(s).
+[403 Buster] Skipped 4 payload(s) at semantic-target or Safe Mode gates.
+[403 Buster] Starting attack with 16 payloads | 1 threads | 2000ms delay | 3 baseline sample(s) | Montoya semantic profile=3 sample(s)
+[403 Buster] Target set: localhost/admin-route — ACTIVE METHODS
+[403 Buster] ACTIVE METHODS enabled for this target only: GET /admin-route
+[403 Buster] Attack finished.
+```
+
+The lab request log recorded `23` requests total. Every recorded request used method `GET`. The log contained the expected Safe Mode Header Injection/header-routing traffic for `/admin-active-methods`, plus one manual `GET /admin-route` request used to select Target B. It contained **zero POST, PUT, PATCH, DELETE, TRACE, or CONNECT requests**.
+
+This proves that changing the global UI mode to Active Methods during an already-running Safe Mode scan does not change that run's captured safety boundary.
+
+**Targeted Safe Mode isolation retest: PASS.**
 
 ## Accepted non-blocking observations
 
@@ -120,12 +150,12 @@ These remain intentionally deferred:
 
 1. With **Hide 404 Responses** disabled, large scans can show many low-confidence `404 STATUS_ANOMALY` rows. They are not bypass candidates, but they can add UI noise.
 2. The configuration labels make ownership of some forwarded-host payloads less obvious: `X-Forwarded-Host` belongs to the IP Spoofing header family rather than the `Header Injection (Proto/Port/Host)` family. This is a minor naming/UX observation, not a detector correctness issue.
-3. Several local smoke-lab revisions were required to isolate Host and redirect-control scenarios. Those corrections were to the lab conditions; they did not require changes to the originally tested extension JAR.
+3. Several local smoke-lab revisions were required to isolate Host and redirect-control scenarios. Those corrections were to the lab conditions; they did not require detector changes.
 
 ## Release decision
 
-**Original v8 manual release validation: PASS.**
+**Final v8 manual release validation: PASS.**
 
-**Current post-review branch: NOT YET FINAL FOR MERGE** until the targeted Safe Mode mode-switch isolation retest passes against the post-review artifact.
+All identified release-blocking safety checks are now cleared, including the post-review Safe Mode per-run isolation issue. The full original manual suite passed, the narrow post-review fix passed automated regression coverage, and the exact post-review artifact passed the targeted runtime retest.
 
-Do not repeat the full A–J smoke suite. After the targeted isolation test passes and current CI remains green, the release blocker is cleared and PR #1 can proceed to the final merge decision.
+The commit that records this final result is documentation-only. After CI is green on that documentation head, PR #1 is ready for the explicit merge/release decision.
