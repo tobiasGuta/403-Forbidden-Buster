@@ -422,7 +422,10 @@ public class BusterUI implements AttackEngine.AttackListener {
         chkHopByHop = new JCheckBox("Hop-By-Hop Header Abuse");
         chkPathObf = new JCheckBox("Path Obfuscation");
         chkMethods = new JCheckBox("Method Tampering & Overrides");
-        chkProtocolDowngrade = new JCheckBox("Protocol Downgrade");
+        chkProtocolDowngrade = new JCheckBox("Protocol Representation Variants (Experimental)");
+        chkProtocolDowngrade.setToolTipText(
+                "Experimental request-line representation only; Burp may normalize the actual network protocol on send."
+        );
         chkSuffixes = new JCheckBox("Suffix Attacks (.json, ?, ;)");
         chkCaseSwitch = new JCheckBox("Case Switching");
         chkUnicode = new JCheckBox("Unicode Normalization");
@@ -681,7 +684,7 @@ public class BusterUI implements AttackEngine.AttackListener {
         loadToggle(chkHopByHop, "hopByHop", true);
         loadToggle(chkPathObf, "pathObf", true);
         loadToggle(chkMethods, "methods", true);
-        loadToggle(chkProtocolDowngrade, "protocol", true);
+        loadToggle(chkProtocolDowngrade, "protocol", false);
         loadToggle(chkSuffixes, "suffixes", true);
         loadToggle(chkHide404, "hide404", false);
         loadToggle(chkHide403, "hide403", false);
