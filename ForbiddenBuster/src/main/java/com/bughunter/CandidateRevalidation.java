@@ -72,7 +72,14 @@ final class CandidateRevalidation {
         }
 
         int confidencePenalty = consistentAdditional == 0 ? 30 : 15;
-        int confidenceCap = completedAll ? 55 : 50;
+        int confidenceCap;
+        if (!completedAll) {
+            confidenceCap = 50;
+        } else if (consistentAdditional == 0) {
+            confidenceCap = 40;
+        } else {
+            confidenceCap = 55;
+        }
         int confidence = Math.min(confidenceCap,
                 clamp(initialAnalysis.confidence() - confidencePenalty));
 
