@@ -34,16 +34,19 @@ jobs:
       - name: Test and build
         run: ./gradlew clean test jar --no-daemon
 
-      - name: Record JAR SHA-256
-        run: sha256sum build/libs/ForbiddenBuster.jar | tee build/libs/ForbiddenBuster.jar.sha256
+      - name: Record artifact provenance
+        run: |
+          echo "${{ github.event.pull_request.head.sha || github.sha }}" > build/libs/SOURCE_COMMIT.txt
+          sha256sum build/libs/ForbiddenBuster.jar | tee build/libs/ForbiddenBuster.jar.sha256
 
       - name: Upload extension JAR
         uses: actions/upload-artifact@v4
         with:
-          name: ForbiddenBuster-v8-${{ github.sha }}
+          name: ForbiddenBuster-v8-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             ForbiddenBuster/build/libs/ForbiddenBuster.jar
             ForbiddenBuster/build/libs/ForbiddenBuster.jar.sha256
+            ForbiddenBuster/build/libs/SOURCE_COMMIT.txt
           if-no-files-found: error
           retention-days: 14
 
