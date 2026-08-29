@@ -428,7 +428,7 @@ public class PayloadGenerator {
         }
 
         // =====================================================================
-        // 9. Protocol Downgrade
+        // 9. Protocol Representation Variants (Experimental)
         // =====================================================================
         if (config.isProtocolDowngrade()) {
             try {
@@ -441,13 +441,13 @@ public class PayloadGenerator {
                         HttpRequest protoReq = HttpRequest.httpRequest(baseRequestResponse.httpService(), modifiedRaw);
                         payloads.add(new Payload(
                                 protoReq,
-                                "Protocol: " + version,
-                                "Protocol Downgrade"
+                                "EXPERIMENTAL representation token: " + version + " (Burp may normalize on send)",
+                                "Protocol Variant (Experimental)"
                         ));
                     }
                 }
             } catch (Exception ignored) {
-                // Protocol manipulation may fail on certain request types
+                // Experimental representation construction may fail on certain request types.
             }
         }
 
