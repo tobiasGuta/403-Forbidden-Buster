@@ -118,7 +118,11 @@ public class AttackEngine {
         int unsafeControlSkips = 0;
 
         for (PayloadGenerator.Payload payload : generatedPayloads) {
-            PairedControlPlanner.Plan plan = PairedControlPlanner.plan(baseRequestResponse, payload);
+            PairedControlPlanner.Plan plan = PairedControlPlanner.plan(
+                    baseRequestResponse,
+                    payload,
+                    config.isActiveMethodsEnabled()
+            );
             if (plan.shouldSkip()) {
                 semanticSkips++;
                 continue;
@@ -167,7 +171,11 @@ public class AttackEngine {
 
             executor.submit(() -> {
                 try {
-                    PairedControlPlanner.Plan plan = PairedControlPlanner.plan(baseRequestResponse, payload);
+                    PairedControlPlanner.Plan plan = PairedControlPlanner.plan(
+                            baseRequestResponse,
+                            payload,
+                            config.isActiveMethodsEnabled()
+                    );
                     if (plan.shouldSkip()) return;
 
                     HttpRequestResponse controlResponse = null;
