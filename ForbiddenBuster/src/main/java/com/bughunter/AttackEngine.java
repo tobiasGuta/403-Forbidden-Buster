@@ -10,9 +10,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Manages attack execution with thread pool, pause/resume/stop controls,
- * global rate limiting, v8 response analysis, and progress reporting.
+ * global rate limiting, calibrated v8 response analysis, and progress reporting.
  */
 public class AttackEngine {
+
+    private static final int SAFE_GET_BASELINE_REPLAYS = 2;
 
     public interface AttackListener {
         void onResult(BypassResult result);
@@ -31,7 +33,7 @@ public class AttackEngine {
     private ExecutorService executor;
     private Thread coordinatorThread;
 
-    // Global rate limiter — shared across all threads
+    // Global rate limiter — shared across calibration and attack workers.
     private volatile long lastRequestTimeMs = 0;
     private final Object rateLock = new Object();
 
@@ -89,19 +91,33 @@ public class AttackEngine {
     }
 
     private void executeAttack(HttpRequestResponse baseRequestResponse, AttackConfig config) {
-        // Build baseline for comparison from the exact Burp request/response context.
         short baseStatus = baseRequestResponse.response().statusCode();
+        if (baseStatus != 401 && baseStatus != 403) {
+            String message = "Target baseline must be 401 or 403, got " + baseStatus + ".";
+            listener.onError("Baseline", message);
+            api.logging().logToError("[403 Buster] " + message);
+            return;
+        }
+
+        // Build baseline from the exact Burp request/response context.
         int baseLength = baseRequestResponse.response().body().length();
         String baseBody = baseRequestResponse.response().bodyToString();
         String baseMethod = baseRequestResponse.request().method();
         ResponseAnalyzer analyzer = new ResponseAnalyzer(baseStatus, baseLength, baseBody, baseMethod);
 
-        // Generate all payloads
+        // Calibrate safe GET baselines before mutation. Non-GET requests are not replayed
+        // automatically because replaying them may have side effects.
+        if (!calibrateBaseline(baseRequestResponse, analyzer, config)) {
+            return;
+        }
+
+        // Generate all payloads only after the baseline is known to be stable.
         List<PayloadGenerator.Payload> payloads = PayloadGenerator.generate(baseRequestResponse, config);
         int total = payloads.size();
 
         api.logging().logToOutput("[403 Buster] Starting attack with " + total + " payloads | " +
-                config.getThreadCount() + " threads | " + config.getDelayMs() + "ms delay");
+                config.getThreadCount() + " threads | " + config.getDelayMs() + "ms delay | " +
+                analyzer.getBaselineSampleCount() + " baseline sample(s)");
 
         listener.onAttackStarted(total);
 
@@ -185,6 +201,54 @@ public class AttackEngine {
             Thread.currentThread().interrupt();
             executor.shutdownNow();
         }
+    }
+
+    /**
+     * Replay unchanged GET requests to learn normal response variance and detect a stale baseline.
+     */
+    private boolean calibrateBaseline(HttpRequestResponse baseRequestResponse,
+                                      ResponseAnalyzer analyzer,
+                                      AttackConfig config) {
+        String method = baseRequestResponse.request().method();
+        if (!"GET".equalsIgnoreCase(method)) {
+            api.logging().logToOutput(
+                    "[403 Buster] Baseline replay skipped for " + method + " to avoid automatic state-changing replays."
+            );
+            return true;
+        }
+
+        api.logging().logToOutput("[403 Buster] Calibrating baseline with " +
+                SAFE_GET_BASELINE_REPLAYS + " live replay(s)...");
+
+        for (int i = 0; i < SAFE_GET_BASELINE_REPLAYS; i++) {
+            if (!waitUntilRunnable()) return false;
+            if (!enforceRateLimit(config.getDelayMs())) return false;
+            if (!waitUntilRunnable()) return false;
+
+            try {
+                HttpRequestResponse replay = api.http().sendRequest(baseRequestResponse.request());
+                short status = replay.response().statusCode();
+                int length = replay.response().body().length();
+                String body = replay.response().bodyToString();
+
+                if (!analyzer.addBaselineSample(status, length, body)) {
+                    String message = "Baseline became unstable: captured " + analyzer.getBaselineStatus()
+                            + " but live replay returned " + status + ". Scan aborted.";
+                    listener.onError("Baseline calibration", message);
+                    api.logging().logToError("[403 Buster] " + message);
+                    return false;
+                }
+            } catch (Exception e) {
+                String message = "Baseline replay failed: " + e.getMessage();
+                listener.onError("Baseline calibration", message);
+                api.logging().logToError("[403 Buster] " + message);
+                return false;
+            }
+        }
+
+        api.logging().logToOutput("[403 Buster] Baseline calibrated: " +
+                analyzer.getBaselineSampleCount() + " stable sample(s).");
+        return true;
     }
 
     /**
