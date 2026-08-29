@@ -151,9 +151,10 @@ public class ResponseAnalyzer {
 
     /**
      * Analyze a mutation against both the denied baseline and a neutral paired
-     * control. This is used for techniques such as X-Original-URL path swapping,
-     * where the visible request path changes and a plain 200 response may simply
-     * be the normal response for that visible path.
+     * control. Controls may neutralize a routing header or preserve a routing
+     * mutation while moving to a synthetic non-target path. Either way, a
+     * candidate that matches the control is evidence of routing-surface behavior,
+     * not protected-resource access.
      */
     public Analysis analyzeWithControl(String requestMethod,
                                        short status, int length, String body,
@@ -168,8 +169,9 @@ public class ResponseAnalyzer {
         boolean sameControlStatus = status == controlStatus;
         String method = normalizeMethod(requestMethod);
 
-        // A 2xx mutation that is effectively identical to the neutral control is
-        // not evidence of a bypass. The routing/header mutation was likely ignored.
+        // A 2xx mutation that is effectively identical to its neutral control is
+        // not evidence of protected-resource access. This catches ignored routing
+        // signals as well as generic/default-vhost and catch-all responses.
         if (status >= 200 && status < 300
                 && controlStatus >= 200 && controlStatus < 300
                 && sameControlStatus
@@ -180,7 +182,7 @@ public class ResponseAnalyzer {
                     0,
                     baselineAnalysis.bodySimilarity(),
                     baselineAnalysis.significantLengthDifference(),
-                    "Candidate matches neutral paired control; bypass signal was likely ignored",
+                    "Candidate matches paired control; response likely reflects generic routing-surface behavior rather than protected-resource access",
                     false,
                     true,
                     controlSimilarity,
@@ -215,7 +217,7 @@ public class ResponseAnalyzer {
             }
         } else if (type == ResultType.REDIRECT) {
             // Do not suppress redirects from body similarity alone because the
-            // Location header is not part of the v8 Slice 2 comparator yet.
+            // Location header is not part of the v8 comparator yet.
             if (!sameControlStatus) confidence += 10;
             if (controlSimilarity < 0.70) confidence += 10;
             confidence = Math.min(55, clamp(confidence));
@@ -338,6 +340,13 @@ public class ResponseAnalyzer {
         return method == null ? "" : method.trim().toUpperCase(Locale.ROOT);
     }
 
+    public int getBaselineSampleCount() {
+        return baselineLengths.size();
+    }
+
+    public short getBaselineStatus() { return baselineStatus; }
+    public int getBaselineLength() { return baselineLength; }
+
     static String normalizeBody(String body) {
         if (body == null || body.isBlank()) return "";
 
@@ -348,7 +357,15 @@ public class ResponseAnalyzer {
         normalized = LONG_HEX.matcher(normalized).replaceAll(" <hex> ");
         normalized = LONG_NUMBER.matcher(normalized).replaceAll(" <number> ");
         normalized = NON_WORD.matcher(normalized).replaceAll(" ");
-        return WHITESPACE.matcher(normalized).replaceAll(" ").trim();
+        normalized = WHITESPACE.matcher(normalized).replaceAll(" ").trim();
+        return normalized;
+    }
+
+    private static boolean containsDenialMarker(String normalizedBody) {
+        for (String marker : DENIAL_MARKERS) {
+            if (normalizedBody.contains(marker)) return true;
+        }
+        return false;
     }
 
     private static Set<String> tokenize(String normalizedBody) {
@@ -356,76 +373,48 @@ public class ResponseAnalyzer {
         return new HashSet<>(Arrays.asList(normalizedBody.split(" ")));
     }
 
-    static double bodySimilarity(String baselineBody, String candidateBody) {
-        String normalizedBaseline = normalizeBody(baselineBody);
-        return bodySimilarity(normalizedBaseline, tokenize(normalizedBaseline), normalizeBody(candidateBody));
+    public static double bodySimilarity(String left, String right) {
+        String normalizedLeft = normalizeBody(left);
+        return bodySimilarity(normalizedLeft, tokenize(normalizedLeft), normalizeBody(right));
     }
 
-    private static double bodySimilarity(String normalizedBaseline, Set<String> baselineTokenSet,
-                                         String normalizedCandidate) {
-        if (normalizedBaseline.isEmpty() && normalizedCandidate.isEmpty()) return 1.0;
-        if (normalizedBaseline.isEmpty() || normalizedCandidate.isEmpty()) return 0.0;
-        if (normalizedBaseline.equals(normalizedCandidate)) return 1.0;
+    private static double bodySimilarity(String normalizedLeft, Set<String> leftTokens,
+                                         String normalizedRight) {
+        if (normalizedLeft.equals(normalizedRight)) return 1.0;
+        Set<String> rightTokens = tokenize(normalizedRight);
+        if (leftTokens.isEmpty() && rightTokens.isEmpty()) return 1.0;
+        if (leftTokens.isEmpty() || rightTokens.isEmpty()) return 0.0;
 
-        Set<String> candidateTokens = tokenize(normalizedCandidate);
-        if (baselineTokenSet.isEmpty() || candidateTokens.isEmpty()) return 0.0;
-
-        Set<String> intersection = new HashSet<>(baselineTokenSet);
-        intersection.retainAll(candidateTokens);
-
-        Set<String> union = new HashSet<>(baselineTokenSet);
-        union.addAll(candidateTokens);
-
+        Set<String> intersection = new HashSet<>(leftTokens);
+        intersection.retainAll(rightTokens);
+        Set<String> union = new HashSet<>(leftTokens);
+        union.addAll(rightTokens);
         return union.isEmpty() ? 1.0 : (double) intersection.size() / union.size();
     }
 
-    private static boolean containsDenialMarker(String normalizedBody) {
-        if (normalizedBody == null || normalizedBody.isBlank()) return false;
-        for (String marker : DENIAL_MARKERS) {
-            if (normalizedBody.contains(marker)) return true;
-        }
-        return false;
+    public enum ResultType {
+        BYPASS_CANDIDATE,
+        REDIRECT,
+        METHOD_BEHAVIOR,
+        ERROR,
+        BODY_ANOMALY,
+        LENGTH_ANOMALY,
+        STATUS_ANOMALY,
+        CONTROL_MATCH,
+        NORMAL
     }
 
-    public short getBaselineStatus() { return baselineStatus; }
-    public int getBaselineLength() { return baselineLength; }
-    public String getBaselineMethod() { return baselineMethod; }
-    public int getBaselineSampleCount() { return baselineLengths.size(); }
-
-    public record Analysis(
-            ResultType type,
-            int confidence,
-            double bodySimilarity,
-            boolean significantLengthDifference,
-            String rationale,
-            boolean shouldLog,
-            boolean controlCompared,
-            double controlSimilarity,
-            int controlStatus
-    ) {
+    public record Analysis(ResultType type,
+                           int confidence,
+                           double bodySimilarity,
+                           boolean significantLengthDifference,
+                           String rationale,
+                           boolean shouldLog,
+                           boolean controlCompared,
+                           double controlSimilarity,
+                           int controlStatus) {
         public boolean interesting() {
             return type == ResultType.BYPASS_CANDIDATE || type == ResultType.REDIRECT;
         }
-    }
-
-    public enum ResultType {
-        /** Strong differential signal, but still requires manual authorization validation. */
-        BYPASS_CANDIDATE,
-        /** Mutation response matched its neutral paired control and is treated as noise. */
-        CONTROL_MATCH,
-        /** 3xx transition from a denied baseline. */
-        REDIRECT,
-        /** 2xx caused by methods such as HEAD/OPTIONS/TRACE/CONNECT. */
-        METHOD_BEHAVIOR,
-        /** 5xx server response. */
-        ERROR,
-        /** Same status but semantically different response body. */
-        BODY_ANOMALY,
-        /** Same status but materially different body length. */
-        LENGTH_ANOMALY,
-        /** Status changed, but evidence is insufficient for a bypass candidate. */
-        STATUS_ANOMALY,
-        /** No meaningful difference from baseline. */
-        NORMAL
     }
 }
