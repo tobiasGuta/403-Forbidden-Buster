@@ -6,8 +6,8 @@ import burp.api.montoya.http.message.requests.HttpRequest;
 /**
  * Plans neutral paired controls for mutations that intentionally change the
  * visible request target. The control keeps the same visible request while
- * removing the bypass signal, which lets v8 distinguish an ignored mutation
- * from a response that is genuinely caused by the bypass technique.
+ * removing only the bypass signal, which lets v8 distinguish an ignored
+ * mutation from a response genuinely caused by the bypass technique.
  */
 final class PairedControlPlanner {
 
@@ -36,10 +36,19 @@ final class PairedControlPlanner {
                 );
             }
 
-            HttpRequest neutralControl = payload.request.withRemovedHeader(header);
+            // Neutralize only the mutation. If the captured baseline already
+            // contained this routing header, restore its original value rather
+            // than deleting legitimate request context.
+            String originalHeaderValue = baseline.request().headerValue(header);
+            HttpRequest neutralControl = originalHeaderValue == null
+                    ? payload.request.withRemovedHeader(header)
+                    : payload.request.withHeader(header, originalHeaderValue);
+
             return Plan.control(
                     neutralControl,
-                    "Same visible path with " + header + " removed"
+                    originalHeaderValue == null
+                            ? "Same visible path with " + header + " removed"
+                            : "Same visible path with original " + header + " restored"
             );
         }
 
