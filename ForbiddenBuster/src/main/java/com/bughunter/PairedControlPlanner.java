@@ -7,9 +7,7 @@ import java.util.Objects;
 
 /**
  * Plans neutral paired controls for mutations that intentionally change the
- * visible request target. The control keeps the same visible request while
- * removing only the bypass signal, which lets v8 distinguish an ignored
- * mutation from a response genuinely caused by the bypass technique.
+ * visible request target. It also acts as the final pre-queue Safe Mode gate.
  */
 final class PairedControlPlanner {
 
@@ -19,6 +17,12 @@ final class PairedControlPlanner {
     private PairedControlPlanner() {}
 
     static Plan plan(HttpRequestResponse baseline, PayloadGenerator.Payload payload) {
+        if (!RequestSafetyPolicy.isAllowedByCurrentMode(payload.request.method())) {
+            return Plan.skip(
+                    "Safe Mode blocked non-allowlisted method " + payload.request.method()
+            );
+        }
+
         if (!PATH_SWAPPING.equals(payload.category)) {
             return Plan.none();
         }
