@@ -9,12 +9,13 @@
 
 When a security professional encounters a restricted page (for example `/admin` or `/api/private`), manually testing every bypass technique is time-consuming. This extension allows the user to right-click the captured Burp request and launch a background scan using common bypass heuristics while preserving the original request context.
 
-Version 8 is accuracy-focused. A status change alone is not treated as proof of an authorization bypass. Results are compared with calibrated denied baselines, neutral paired controls where appropriate, and safe repeatability checks for high-signal GET candidates.
+Version 8 is accuracy- and safety-focused. A status change alone is not treated as proof of an authorization bypass. Results are compared with calibrated denied baselines, neutral paired controls where appropriate, and safe repeatability checks for high-signal GET candidates. Safe Mode is the default execution profile; non-GET/HEAD/OPTIONS request families require a per-target Active Methods opt-in.
 
 ---
 
 ## Key Features
 * **150+ Bypass Techniques:** Automated fuzzing with header poisoning, path obfuscation, method tampering, protocol variants, Unicode normalization, backslash tricks, and more.
+* **Safe Mode by Default:** Automatic transmission is limited to GET/HEAD/OPTIONS technique families. Non-allowlisted methods are gated behind an explicit per-target confirmation and are never persisted as the default.
 * **Calibrated Baselines:** Safe GET targets are replayed before fuzzing to learn normal response variance and reject stale authorization baselines.
 * **Paired Differential Controls:** Target-preserving `X-Original-URL` and `X-Rewrite-URL` path swaps are compared with the same visible request minus the routing mutation so a normal root-page `200` is not mistaken for a bypass.
 * **Semantic-Target Guard:** Dictionary path swaps that point at a different resource are skipped instead of being scored as target bypasses.
@@ -25,7 +26,7 @@ Version 8 is accuracy-focused. A status change alone is not treated as proof of 
 * **CSV Export:** Export the results table to CSV for reporting and further analysis.
 * **Global Rate Limiting:** Enforced across baseline calibration, paired controls, candidate revalidation, and attack requests.
 * **Native Burp UI:** Split-pane Request/Response editors for manual validation.
-* **Persistent Configuration:** Settings are saved across Burp restarts.
+* **Persistent Configuration:** Ordinary scan settings are saved across Burp restarts. Active Methods permission is intentionally not persisted.
 
 ---
 
@@ -35,15 +36,39 @@ The extension follows a modular architecture with clean separation of concerns:
 
 | File | Responsibility |
 | :--- | :--- |
-| `ForbiddenBuster.java` | Entry point — registers extension, tab, context menu, unload handler |
+| `ForbiddenBuster.java` | Entry point — registers extension, tab, Safe/Active context-menu actions, unload handler |
 | `BusterUI.java` | Swing UI, event handling, persistence, CSV export, result table |
 | `AttackEngine.java` | Baseline calibration, paired-control execution, safe candidate revalidation, thread management, pause/resume/stop, global rate limiting |
-| `AttackConfig.java` | Immutable configuration holder with input validation |
+| `AttackConfig.java` | Immutable configuration plus effective Safe Mode technique gates |
+| `ActiveMethodsRegistry.java` | Stores the current target's ephemeral Safe/Active execution choice; never persisted |
+| `RequestSafetyPolicy.java` | Central GET/HEAD/OPTIONS automatic-method allowlist |
 | `BypassResult.java` | Stores candidate evidence, classification, confidence, paired-control evidence, and repeatability metadata |
-| `PayloadGenerator.java` | Generates bypass payloads across attack categories |
+| `PayloadGenerator.java` | Generates bypass payloads from the effective technique configuration |
 | `PairedControlPlanner.java` | Enforces semantic-target invariants and creates neutral paired controls for supported mutations |
 | `CandidateRevalidation.java` | Scores safe replay consistency and adjusts candidate classification/confidence based on repeatability |
 | `ResponseAnalyzer.java` | Baseline/control differential analysis and false-positive reduction |
+
+---
+
+## Execution Safety Profiles
+
+### Safe Mode — default
+Use the normal context-menu action:
+
+`Bypass 403 Forbidden (Safe Mode)`
+
+Safe Mode permits automatic technique families only when the selected target method is `GET`, `HEAD`, or `OPTIONS`. If the captured target itself is another method, configuration validation refuses the scan rather than silently replaying it.
+
+The current Method Tampering category and the current Header Injection category are completely gated in Safe Mode because those generator families contain non-allowlisted requests. Other header-, path-, normalization-, protocol-, suffix-, and routing-oriented families remain available when they preserve an allowlisted target method.
+
+### Active Methods — explicit per target
+Use:
+
+`Bypass 403 Forbidden (Active Methods...)`
+
+Burp shows a warning before enabling this mode. The researcher must confirm that the target is authorized and that state-changing side effects are understood. Active mode can include `POST`, `PUT`, `PATCH`, `DELETE`, `TRACE`, `CONNECT`, and method-override requests.
+
+Active Methods permission applies only to the currently selected target and is intentionally reset when the extension loads or unloads. Cancelling the confirmation keeps Safe Mode active.
 
 ---
 
@@ -83,7 +108,7 @@ Tests Unicode and encoded path variants that may be normalized differently by fr
 Tests backslash-based path variants relevant to stacks that normalize separators differently.
 
 ### 8. Method Tampering & Overrides
-Tests alternate methods and method-override headers. Informational methods such as `HEAD` and `OPTIONS` are not automatically treated as bypasses merely because they return `2xx`.
+Tests alternate methods and method-override headers. This category is Active-Methods-only in v8 Slice 4. Informational method responses are still analyzed conservatively rather than being called bypasses solely because they return `2xx`.
 
 ### 9. Protocol Variants
 Tests request-version mutations. Protocol behavior should still be manually validated because the HTTP stack can normalize requests before transmission.
@@ -92,7 +117,7 @@ Tests request-version mutations. Protocol behavior should still be manually vali
 Tests file-extension, query, fragment-style, and path-suffix variations.
 
 ### 11. Header Injection / Routing Hints
-Tests forwarding scheme/port headers, Host variants, content types, Accept variants, and related routing hints.
+Tests forwarding scheme/port headers, Host variants, content types, Accept variants, and related routing hints. The current category also contains POST-based Content-Type variants, so the whole category is gated behind Active Methods until the generator is split into safe and active subfamilies.
 
 ---
 
@@ -142,7 +167,7 @@ Results can be classified as:
 | `BYPASS_CANDIDATE` | Strong differential evidence; safe GET candidates must also survive automatic repeatability checks |
 | `CONTROL_MATCH` | Mutation matched its neutral paired control and is suppressed as likely noise |
 | `REDIRECT` | Denied baseline changed to 3xx; redirect destination requires inspection |
-| `METHOD_BEHAVIOR` | Success response came from a method whose semantics commonly differ, such as HEAD/OPTIONS |
+| `METHOD_BEHAVIOR` | Success response came from a method whose semantics commonly differ |
 | `BODY_ANOMALY` | Same status but materially different response body |
 | `LENGTH_ANOMALY` | Same status but response length falls outside calibrated baseline variance |
 | `STATUS_ANOMALY` | Status changed but evidence is insufficient or repeatability was unstable |
@@ -180,9 +205,10 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 ## Quick Start
 
 1. Browse to a request that returns `401 Unauthorized` or `403 Forbidden` through Burp Suite.
-2. In **Proxy → HTTP History**, right-click the request and select **"Bypass 403 Forbidden"**.
-3. Open the **403 Buster** tab and click **Run Attack**.
-4. Review candidate requests and responses manually. A high-confidence candidate is not automatically a confirmed authorization bypass.
+2. In **Proxy → HTTP History**, right-click the request.
+3. Choose **`Bypass 403 Forbidden (Safe Mode)`** for the normal scan. Use **`Active Methods...`** only when the additional request methods are appropriate for the authorized target and confirm the warning.
+4. Open the **403 Buster** tab and click **Run Attack**.
+5. Review candidate requests and responses manually. A high-confidence candidate is not automatically a confirmed authorization bypass.
 
 ---
 
@@ -190,7 +216,7 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 
 | Control | Description |
 | :--- | :--- |
-| **Run Attack** | Launches the configured scan against the selected target |
+| **Run Attack** | Launches the configured scan against the selected target and its selected safety profile |
 | **Pause / Resume** | Stops workers before transmission without discarding scan state |
 | **Stop** | Prevents interrupted/rate-limited workers from continuing into new sends |
 | **Clear Results** | Clears the results table |
@@ -202,6 +228,7 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 
 | Setting | Default | Range | Purpose |
 | :--- | :--- | :--- | :--- |
+| **Execution profile** | Safe Mode | Safe / per-target Active opt-in | Controls whether non-GET/HEAD/OPTIONS families are eligible |
 | **Request Delay (ms)** | `50` | 0–2000 in UI | Global delay between transmitted requests |
 | **Threads** | `5` | 1–50 | Number of concurrent attack workers |
 
