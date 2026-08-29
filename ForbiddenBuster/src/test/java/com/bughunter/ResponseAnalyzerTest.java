@@ -42,6 +42,26 @@ class ResponseAnalyzerTest {
     }
 
     @Test
+    void genericDefaultVhostResponseIsSuppressedAsControlMatch() {
+        String denied = "Forbidden - access denied";
+        String genericVhost = "Default virtual host. Nothing configured here.";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyzeWithControl(
+                "GET",
+                (short) 200, genericVhost.length(), genericVhost,
+                (short) 200, genericVhost.length(), genericVhost,
+                false, false
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.CONTROL_MATCH, analysis.type());
+        assertEquals(0, analysis.confidence());
+        assertFalse(analysis.shouldLog());
+        assertTrue(analysis.rationale().contains("routing-surface behavior"));
+        assertTrue(analysis.rationale().contains("protected-resource access"));
+    }
+
+    @Test
     void pairedControlDifferenceStrengthensRealBypassCandidate() {
         String denied = "Forbidden - access denied";
         String homepageControl = "Welcome home products pricing documentation";
