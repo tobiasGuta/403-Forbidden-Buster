@@ -7,8 +7,8 @@ This file records the manual release validation performed for the v8 accuracy/sa
 | Field | Value |
 | :--- | :--- |
 | Branch | `feat/v8-accuracy-engine` |
-| Tested source commit | `800b359234888c6019c538961fb25bd4289b5d10` |
-| Tested JAR SHA-256 | `6444de5fdfc7cc0c0e336ff4305680b01a9a618cbfb0ab23f367900813de1ccb` |
+| Originally tested source commit | `800b359234888c6019c538961fb25bd4289b5d10` |
+| Originally tested JAR SHA-256 | `6444de5fdfc7cc0c0e336ff4305680b01a9a618cbfb0ab23f367900813de1ccb` |
 | Provenance artifact | `ForbiddenBuster-v8-800b359234888c6019c538961fb25bd4289b5d10` |
 | Artifact ZIP SHA-256 | `a48ac1bbd4f10ea893b07ce48f6d79f1a3acf7fde290577a1aaa2317bbd25fe9` |
 | Burp | Community Edition `v2026.7.3` |
@@ -16,9 +16,9 @@ This file records the manual release validation performed for the v8 accuracy/sa
 | Test date | `2026-08-29` |
 | Tester | `tobiasGuta` |
 | Test target | Disposable local Docker smoke-test lab |
-| Manual verdict | **PASS** |
+| Original manual verdict | **PASS** |
 
-The exact tested code commit passed GitHub Actions CI run **#134** before manual validation. The validation-record commit that adds this file is documentation-only; it does not modify extension source or detector behavior.
+The exact originally tested code commit passed GitHub Actions CI run **#134** before manual validation. The first validation-record commits were documentation-only.
 
 ## Manual validation summary
 
@@ -85,11 +85,11 @@ Both CSV rows matched the Burp table and contained `ControlCompared=true`, `Cont
 
 Montoya semantic evidence remained supplemental: it appeared in rationale/evidence but did not independently promote redirects or unstable candidates into bypass candidates.
 
-## Release-blocker review
+## Release-blocker review from original RC
 
-No release-blocking behavior was observed during the manual validation:
+No release-blocking behavior was observed during the original manual validation:
 
-- **No Safe Mode method escape** was observed.
+- **No Safe Mode method escape** was observed in the tested static-mode scenarios.
 - **No request escaped the verified Stop barrier**.
 - **No generic public/default-vhost response was surfaced as a bypass when its paired control matched**.
 - **No login/auth redirect received high-confidence bypass treatment**.
@@ -97,18 +97,35 @@ No release-blocking behavior was observed during the manual validation:
 - **No candidate/evidence/CSV mismatch was observed in the final sanity check**.
 - **No unhandled extension exception was observed on the normal smoke-test path**.
 
+## Post-review Safe Mode isolation fix
+
+A final code review after the original manual PASS identified a per-run isolation issue: `PairedControlPlanner` consulted the mutable global `ActiveMethodsRegistry` while an attack was executing. In a narrow race, selecting **Active Methods** for another target while an existing Safe Mode run was still calibrating could have changed the final method gate seen by that already-running scan.
+
+The fix binds planner safety decisions to the immutable `AttackConfig` mode captured when the run starts:
+
+- `PairedControlPlanner.plan(...)` now requires the captured `activeMethodsEnabled` value.
+- `AttackEngine` passes `config.isActiveMethodsEnabled()` both during payload filtering and again inside the worker before transmission.
+- The planner no longer consults `ActiveMethodsRegistry` during execution.
+- Regression tests verify that a Safe Mode run remains Safe even if the global registry later changes to Active Methods, and that an Active run likewise keeps its captured mode if the registry later changes back.
+
+Post-review fix head before this documentation update: `068b727bc2fecf5c7c0494339f0be683e0ff04b7`.
+
+GitHub Actions CI run **#144** completed successfully: test/build, artifact provenance, and artifact upload all passed.
+
+Because this fix changes a release-blocking safety boundary, one **targeted manual mode-switch isolation retest** is still required before merge. The full original smoke suite does not need to be repeated.
+
 ## Accepted non-blocking observations
 
-These are intentionally deferred rather than changed in the release candidate:
+These remain intentionally deferred:
 
 1. With **Hide 404 Responses** disabled, large scans can show many low-confidence `404 STATUS_ANOMALY` rows. They are not bypass candidates, but they can add UI noise.
 2. The configuration labels make ownership of some forwarded-host payloads less obvious: `X-Forwarded-Host` belongs to the IP Spoofing header family rather than the `Header Injection (Proto/Port/Host)` family. This is a minor naming/UX observation, not a detector correctness issue.
-3. Several local smoke-lab revisions were required to isolate Host and redirect-control scenarios. Those corrections were to the lab conditions; they did not require changes to the tested extension JAR.
+3. Several local smoke-lab revisions were required to isolate Host and redirect-control scenarios. Those corrections were to the lab conditions; they did not require changes to the originally tested extension JAR.
 
 ## Release decision
 
-**Manual v8 release validation: PASS.**
+**Original v8 manual release validation: PASS.**
 
-The detector/source code is frozen at tested commit `800b359234888c6019c538961fb25bd4289b5d10`. No additional detector feature or cleanup change should be introduced as part of this validation record.
+**Current post-review branch: NOT YET FINAL FOR MERGE** until the targeted Safe Mode mode-switch isolation retest passes against the post-review artifact.
 
-Next gate: require CI to remain green on this documentation-only validation commit, then PR #1 may be moved from Draft to Ready for Review. Merging/releasing remains a separate explicit decision.
+Do not repeat the full A–J smoke suite. After the targeted isolation test passes and current CI remains green, the release blocker is cleared and PR #1 can proceed to the final merge decision.
