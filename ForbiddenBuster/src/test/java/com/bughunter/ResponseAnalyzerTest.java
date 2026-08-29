@@ -70,6 +70,32 @@ class ResponseAnalyzerTest {
     }
 
     @Test
+    void secondaryBaselineSampleAbsorbsLegitimateDynamicVariance() {
+        String first = "Forbidden access denied edge template alpha";
+        String second = "Forbidden access denied edge template beta with extra dynamic content";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, first.length(), first, "GET");
+
+        assertTrue(analyzer.addBaselineSample((short) 403, second.length(), second));
+        assertEquals(2, analyzer.getBaselineSampleCount());
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyze(
+                "GET", (short) 403, second.length(), second, false, false);
+
+        assertEquals(ResponseAnalyzer.ResultType.NORMAL, analysis.type());
+        assertFalse(analysis.shouldLog());
+        assertEquals(1.0, analysis.bodySimilarity(), 0.0001);
+    }
+
+    @Test
+    void changedAuthorizationStatusCannotPolluteBaselineProfile() {
+        String denied = "Forbidden access denied";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        assertFalse(analyzer.addBaselineSample((short) 200, 100, "Admin dashboard"));
+        assertEquals(1, analyzer.getBaselineSampleCount());
+    }
+
+    @Test
     void dynamicIdentifiersAreNormalizedBeforeSimilarityComparison() {
         String first = "Forbidden request 123456 id 550e8400-e29b-41d4-a716-446655440000";
         String second = "Forbidden request 987654 id 123e4567-e89b-42d3-a456-556642440000";
