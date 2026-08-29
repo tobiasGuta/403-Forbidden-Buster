@@ -9,7 +9,7 @@
 
 When a security professional encounters a restricted page (for example `/admin` or `/api/private`), manually testing every bypass technique is time-consuming. This extension allows the user to right-click the captured Burp request and launch a background scan using common bypass heuristics while preserving the original request context.
 
-Version 8 is accuracy-focused. A status change alone is not treated as proof of an authorization bypass. Results are compared with calibrated denied baselines and, where a mutation changes the visible request target, neutral paired controls.
+Version 8 is accuracy-focused. A status change alone is not treated as proof of an authorization bypass. Results are compared with calibrated denied baselines, neutral paired controls where appropriate, and safe repeatability checks for high-signal GET candidates.
 
 ---
 
@@ -18,11 +18,12 @@ Version 8 is accuracy-focused. A status change alone is not treated as proof of 
 * **Calibrated Baselines:** Safe GET targets are replayed before fuzzing to learn normal response variance and reject stale authorization baselines.
 * **Paired Differential Controls:** Target-preserving `X-Original-URL` and `X-Rewrite-URL` path swaps are compared with the same visible request minus the routing mutation so a normal root-page `200` is not mistaken for a bypass.
 * **Semantic-Target Guard:** Dictionary path swaps that point at a different resource are skipped instead of being scored as target bypasses.
-* **Evidence-Based Classification:** Status, method semantics, normalized body similarity, denial markers, body length, and paired-control differences contribute to candidate confidence.
+* **Safe Candidate Revalidation:** High-signal GET candidates are replayed twice. Only a stable `3/3` result retains `BYPASS_CANDIDATE`; paired-control techniques receive a fresh neutral control on every replay.
+* **Evidence-Based Classification:** Status, method semantics, normalized body similarity, denial markers, body length, paired-control differences, and repeatability contribute to candidate confidence.
 * **Attack Controls:** Pause, resume, and stop attacks on demand. Queued workers respect pause, and Stop acts as a send barrier.
 * **Progress Bar:** Real-time completion tracking for long-running scans.
 * **CSV Export:** Export the results table to CSV for reporting and further analysis.
-* **Global Rate Limiting:** Enforced across baseline calibration, paired controls, and attack requests.
+* **Global Rate Limiting:** Enforced across baseline calibration, paired controls, candidate revalidation, and attack requests.
 * **Native Burp UI:** Split-pane Request/Response editors for manual validation.
 * **Persistent Configuration:** Settings are saved across Burp restarts.
 
@@ -36,11 +37,12 @@ The extension follows a modular architecture with clean separation of concerns:
 | :--- | :--- |
 | `ForbiddenBuster.java` | Entry point — registers extension, tab, context menu, unload handler |
 | `BusterUI.java` | Swing UI, event handling, persistence, CSV export, result table |
-| `AttackEngine.java` | Baseline calibration, paired-control execution, thread management, pause/resume/stop, global rate limiting |
+| `AttackEngine.java` | Baseline calibration, paired-control execution, safe candidate revalidation, thread management, pause/resume/stop, global rate limiting |
 | `AttackConfig.java` | Immutable configuration holder with input validation |
-| `BypassResult.java` | Stores candidate evidence, classification, confidence, and optional paired-control evidence |
+| `BypassResult.java` | Stores candidate evidence, classification, confidence, paired-control evidence, and repeatability metadata |
 | `PayloadGenerator.java` | Generates bypass payloads across attack categories |
 | `PairedControlPlanner.java` | Enforces semantic-target invariants and creates neutral paired controls for supported mutations |
+| `CandidateRevalidation.java` | Scores safe replay consistency and adjusts candidate classification/confidence based on repeatability |
 | `ResponseAnalyzer.java` | Baseline/control differential analysis and false-positive reduction |
 
 ---
@@ -103,23 +105,52 @@ For a captured GET request returning `401` or `403`, the extension sends two unc
 
 Dynamic response values such as long numeric IDs, UUIDs, timestamps, and long hexadecimal values are normalized before body similarity comparison.
 
+### Paired controls
+For supported mutations that intentionally change the visible request target, v8 sends a neutral paired control that preserves the same visible request while removing or restoring only the routing mutation. This helps distinguish a real routing differential from the normal response of the visible path.
+
+For paired-control candidates, repeatability testing refreshes the neutral control before every candidate replay. A replay therefore counts only when the **differential itself** remains present.
+
+### Candidate repeatability
+A high-signal `GET` candidate is automatically replayed twice after its initial response:
+
+```text
+Initial candidate
+      ↓
+Replay #1
+      ↓
+Replay #2
+      ↓
+repeatability verdict
+```
+
+A replay counts as consistent only when it remains a `BYPASS_CANDIDATE`, returns the same status as the initial candidate, and its normalized body stays sufficiently similar to the original candidate response.
+
+| Repeatability | Result |
+| :--- | :--- |
+| `3/3` | Keeps `BYPASS_CANDIDATE`; confidence may increase, capped at 100 |
+| `2/3` | Downgraded to `STATUS_ANOMALY`; confidence capped at 55 |
+| `1/3` | Downgraded to `STATUS_ANOMALY`; confidence capped at 40 |
+| Incomplete replay sequence | Downgraded to `STATUS_ANOMALY`; confidence capped at 50 |
+
+Automatic candidate replay is currently limited to `GET`. Potentially state-changing methods are not automatically repeated; the result records that revalidation was skipped so the researcher can decide how to validate it safely.
+
 ### Classification
 Results can be classified as:
 
 | Classification | Meaning |
 | :--- | :--- |
-| `BYPASS_CANDIDATE` | Strong differential evidence; still requires manual authorization validation |
+| `BYPASS_CANDIDATE` | Strong differential evidence; safe GET candidates must also survive automatic repeatability checks |
 | `CONTROL_MATCH` | Mutation matched its neutral paired control and is suppressed as likely noise |
 | `REDIRECT` | Denied baseline changed to 3xx; redirect destination requires inspection |
 | `METHOD_BEHAVIOR` | Success response came from a method whose semantics commonly differ, such as HEAD/OPTIONS |
 | `BODY_ANOMALY` | Same status but materially different response body |
 | `LENGTH_ANOMALY` | Same status but response length falls outside calibrated baseline variance |
-| `STATUS_ANOMALY` | Status changed but evidence is insufficient for a strong bypass candidate |
+| `STATUS_ANOMALY` | Status changed but evidence is insufficient or repeatability was unstable |
 | `ERROR` | Server returned 5xx |
 | `NORMAL` | No meaningful difference; normally not shown |
 
 ### Confidence
-Confidence is an evidence score for triage, not a vulnerability severity score and not proof of exploitability. It can increase when the candidate differs substantially from both denied baselines and a neutral control, and decrease when the response resembles denial/control behavior.
+Confidence is an evidence score for triage, not a vulnerability severity score and not proof of exploitability. It can increase when the candidate differs substantially from both denied baselines and a neutral control and remains repeatable, and decrease when the response resembles denial/control behavior or fails replay consistency.
 
 ---
 
@@ -178,7 +209,7 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 
 ## Manual Validation
 
-A `BYPASS_CANDIDATE` means the response has enough differential evidence to justify manual inspection. Before reporting a vulnerability, verify that the response actually exposes the protected resource, data, or action and that the behavior is repeatable within the authorized testing scope.
+A `BYPASS_CANDIDATE` means the response has enough differential and repeatability evidence to justify manual inspection. Automated repeatability still does **not** prove that the response exposes the intended protected resource, data, or action. Before reporting a vulnerability, validate those protected semantics manually and remain within the authorized testing scope.
 
 ---
 
