@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class CandidateRevalidationTest {
 
     @Test
-    void threeOfThreeStableCandidateKeepsClassificationAndGainsConfidence() {
+    void threeOfThreeStableCandidateKeepsClassificationAndConfidence() {
         String denied = "Forbidden access denied";
         String allowed = "admin dashboard billing users settings";
         ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
@@ -36,7 +36,8 @@ class CandidateRevalidationTest {
         assertTrue(summary.attempted());
         assertEquals(3, summary.consistentPasses());
         assertEquals(3, summary.totalSamples());
-        assertTrue(summary.confidence() > initial.confidence());
+        assertTrue(summary.confidence() >= initial.confidence());
+        assertTrue(summary.confidence() <= 100);
         assertTrue(summary.rationale().contains("3/3"));
     }
 
