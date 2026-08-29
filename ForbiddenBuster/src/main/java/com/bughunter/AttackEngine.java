@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Manages attack execution with thread pool, pause/resume/stop controls,
- * proper rate limiting, and progress reporting.
+ * global rate limiting, v8 response analysis, and progress reporting.
  */
 public class AttackEngine {
 
@@ -71,6 +71,7 @@ public class AttackEngine {
 
         isRunning = true;
         isPaused = false;
+        lastRequestTimeMs = 0;
 
         coordinatorThread = new Thread(() -> {
             try {
@@ -88,10 +89,12 @@ public class AttackEngine {
     }
 
     private void executeAttack(HttpRequestResponse baseRequestResponse, AttackConfig config) {
-        // Build baseline for comparison
+        // Build baseline for comparison from the exact Burp request/response context.
         short baseStatus = baseRequestResponse.response().statusCode();
         int baseLength = baseRequestResponse.response().body().length();
-        ResponseAnalyzer analyzer = new ResponseAnalyzer(baseStatus, baseLength);
+        String baseBody = baseRequestResponse.response().bodyToString();
+        String baseMethod = baseRequestResponse.request().method();
+        ResponseAnalyzer analyzer = new ResponseAnalyzer(baseStatus, baseLength, baseBody, baseMethod);
 
         // Generate all payloads
         List<PayloadGenerator.Payload> payloads = PayloadGenerator.generate(baseRequestResponse, config);
@@ -114,26 +117,32 @@ public class AttackEngine {
         for (PayloadGenerator.Payload payload : payloads) {
             if (!isRunning) break;
 
-            // Pause support
-            while (isPaused && isRunning) {
-                try { Thread.sleep(200); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-            }
-            if (!isRunning) break;
+            // Avoid filling the queue while paused. Workers also enforce pause immediately before sending.
+            if (!waitUntilRunnable()) break;
 
             executor.submit(() -> {
                 try {
-                    // Global rate limiting
-                    enforceRateLimit(config.getDelayMs());
+                    if (!waitUntilRunnable()) return;
+
+                    // Global rate limiting. If Stop interrupts the wait, do not send afterward.
+                    if (!enforceRateLimit(config.getDelayMs())) return;
+                    if (!waitUntilRunnable()) return;
 
                     HttpRequestResponse response = api.http().sendRequest(payload.request);
                     short statusCode = response.response().statusCode();
                     int length = response.response().body().length();
+                    String body = response.response().bodyToString();
 
-                    if (analyzer.shouldLog(statusCode, length, config.isHide404(), config.isHide403())) {
-                        boolean interesting = analyzer.classify(statusCode, length) == ResponseAnalyzer.ResultType.BYPASS
-                                || analyzer.classify(statusCode, length) == ResponseAnalyzer.ResultType.REDIRECT;
+                    ResponseAnalyzer.Analysis analysis = analyzer.analyze(
+                            payload.request.method(),
+                            statusCode,
+                            length,
+                            body,
+                            config.isHide404(),
+                            config.isHide403()
+                    );
 
+                    if (analysis.shouldLog()) {
                         BypassResult result = new BypassResult(
                                 idCounter.getAndIncrement(),
                                 payload.request.method(),
@@ -143,13 +152,18 @@ public class AttackEngine {
                                 statusCode,
                                 length,
                                 response,
-                                interesting
+                                analysis.type(),
+                                analysis.confidence(),
+                                analysis.bodySimilarity(),
+                                analysis.rationale()
                         );
                         listener.onResult(result);
                     }
                 } catch (Exception e) {
-                    listener.onError(payload.description, e.getMessage());
-                    api.logging().logToError("[403 Buster] Error: " + payload.description + " — " + e.getMessage());
+                    if (isRunning) {
+                        listener.onError(payload.description, e.getMessage());
+                        api.logging().logToError("[403 Buster] Error: " + payload.description + " — " + e.getMessage());
+                    }
                 } finally {
                     int done = completed.incrementAndGet();
                     listener.onProgressUpdate(done, total);
@@ -174,19 +188,44 @@ public class AttackEngine {
     }
 
     /**
-     * Enforces global rate limiting across all threads.
-     * This ensures the actual request rate matches user expectation.
+     * Blocks a worker while paused and returns false if the run has been stopped or interrupted.
      */
-    private void enforceRateLimit(int delayMs) {
-        if (delayMs <= 0) return;
+    private boolean waitUntilRunnable() {
+        while (isPaused && isRunning) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return isRunning && !Thread.currentThread().isInterrupted();
+    }
+
+    /**
+     * Enforces global rate limiting across all threads.
+     * Returns false when interrupted so Stop is a hard send barrier.
+     */
+    private boolean enforceRateLimit(int delayMs) {
+        if (delayMs <= 0) return isRunning && !Thread.currentThread().isInterrupted();
+
         synchronized (rateLock) {
+            if (!isRunning || Thread.currentThread().isInterrupted()) return false;
+
             long now = System.currentTimeMillis();
             long elapsed = now - lastRequestTimeMs;
             if (elapsed < delayMs) {
-                try { Thread.sleep(delayMs - elapsed); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                try {
+                    Thread.sleep(delayMs - elapsed);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
             }
+
+            if (!isRunning || Thread.currentThread().isInterrupted()) return false;
             lastRequestTimeMs = System.currentTimeMillis();
+            return true;
         }
     }
 }
