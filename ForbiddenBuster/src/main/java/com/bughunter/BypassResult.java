@@ -23,6 +23,10 @@ public class BypassResult {
     private final boolean controlCompared;
     private final int controlStatus;
     private final double controlSimilarity;
+    private final boolean revalidationAttempted;
+    private final int repeatabilityPasses;
+    private final int repeatabilitySamples;
+    private final String revalidationRationale;
 
     public BypassResult(int id, String method, String url, String technique, String category,
                         int status, int length, HttpRequestResponse requestResponse,
@@ -30,7 +34,8 @@ public class BypassResult {
                         double bodySimilarity, String rationale) {
         this(id, method, url, technique, category, status, length, requestResponse,
                 classification, confidence, bodySimilarity, rationale,
-                null, false, -1, -1.0);
+                null, false, -1, -1.0,
+                false, 0, 1, "Revalidation not attempted");
     }
 
     public BypassResult(int id, String method, String url, String technique, String category,
@@ -39,6 +44,20 @@ public class BypassResult {
                         double bodySimilarity, String rationale,
                         HttpRequestResponse controlRequestResponse, boolean controlCompared,
                         int controlStatus, double controlSimilarity) {
+        this(id, method, url, technique, category, status, length, requestResponse,
+                classification, confidence, bodySimilarity, rationale,
+                controlRequestResponse, controlCompared, controlStatus, controlSimilarity,
+                false, 0, 1, "Revalidation not attempted");
+    }
+
+    public BypassResult(int id, String method, String url, String technique, String category,
+                        int status, int length, HttpRequestResponse requestResponse,
+                        ResponseAnalyzer.ResultType classification, int confidence,
+                        double bodySimilarity, String rationale,
+                        HttpRequestResponse controlRequestResponse, boolean controlCompared,
+                        int controlStatus, double controlSimilarity,
+                        boolean revalidationAttempted, int repeatabilityPasses,
+                        int repeatabilitySamples, String revalidationRationale) {
         this.id = id;
         this.method = method;
         this.url = url;
@@ -55,6 +74,10 @@ public class BypassResult {
         this.controlCompared = controlCompared;
         this.controlStatus = controlStatus;
         this.controlSimilarity = controlSimilarity;
+        this.revalidationAttempted = revalidationAttempted;
+        this.repeatabilityPasses = repeatabilityPasses;
+        this.repeatabilitySamples = repeatabilitySamples;
+        this.revalidationRationale = revalidationRationale;
     }
 
     public int getId() { return id; }
@@ -73,6 +96,10 @@ public class BypassResult {
     public boolean isControlCompared() { return controlCompared; }
     public int getControlStatus() { return controlStatus; }
     public double getControlSimilarity() { return controlSimilarity; }
+    public boolean isRevalidationAttempted() { return revalidationAttempted; }
+    public int getRepeatabilityPasses() { return repeatabilityPasses; }
+    public int getRepeatabilitySamples() { return repeatabilitySamples; }
+    public String getRevalidationRationale() { return revalidationRationale; }
 
     /**
      * High-signal rows are candidates or redirects, never automatically confirmed vulnerabilities.
