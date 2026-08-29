@@ -21,6 +21,84 @@ class ResponseAnalyzerTest {
     }
 
     @Test
+    void pairedControlMatchSuppressesRootPageFalsePositive() {
+        String denied = "Forbidden - access denied";
+        String homepageControl = "Welcome home products pricing documentation";
+        String candidate = "Welcome home products pricing documentation";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyzeWithControl(
+                "GET",
+                (short) 200, candidate.length(), candidate,
+                (short) 200, homepageControl.length(), homepageControl,
+                false, false
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.CONTROL_MATCH, analysis.type());
+        assertEquals(0, analysis.confidence());
+        assertFalse(analysis.shouldLog());
+        assertTrue(analysis.controlCompared());
+        assertEquals(1.0, analysis.controlSimilarity(), 0.0001);
+    }
+
+    @Test
+    void pairedControlDifferenceStrengthensRealBypassCandidate() {
+        String denied = "Forbidden - access denied";
+        String homepageControl = "Welcome home products pricing documentation";
+        String adminCandidate = "Admin dashboard users billing secrets configuration";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyzeWithControl(
+                "GET",
+                (short) 200, adminCandidate.length(), adminCandidate,
+                (short) 200, homepageControl.length(), homepageControl,
+                false, false
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.BYPASS_CANDIDATE, analysis.type());
+        assertTrue(analysis.confidence() >= 60);
+        assertTrue(analysis.shouldLog());
+        assertTrue(analysis.controlCompared());
+        assertTrue(analysis.controlSimilarity() < 0.35);
+    }
+
+    @Test
+    void pairedControlWithDifferentStatusAddsDifferentialEvidence() {
+        String denied = "Forbidden - access denied";
+        String notFound = "Not found";
+        String adminCandidate = "Admin dashboard users billing configuration";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyzeWithControl(
+                "GET",
+                (short) 200, adminCandidate.length(), adminCandidate,
+                (short) 404, notFound.length(), notFound,
+                false, false
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.BYPASS_CANDIDATE, analysis.type());
+        assertTrue(analysis.confidence() >= 70);
+        assertEquals(404, analysis.controlStatus());
+    }
+
+    @Test
+    void redirectIsNotSuppressedFromEmptyBodyControlAlone() {
+        String denied = "Forbidden - access denied";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyzeWithControl(
+                "GET",
+                (short) 302, 0, "",
+                (short) 302, 0, "",
+                false, false
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.REDIRECT, analysis.type());
+        assertTrue(analysis.shouldLog());
+        assertTrue(analysis.controlCompared());
+    }
+
+    @Test
     void twoHundredWithSameDenialBodyIsOnlyStatusAnomaly() {
         String denied = "Forbidden - access denied";
         ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
