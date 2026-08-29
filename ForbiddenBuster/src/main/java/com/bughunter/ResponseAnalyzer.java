@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
  *
  * A status transition alone is never treated as proof of an authorization bypass.
  * The analyzer combines status, method semantics, normalized body similarity,
- * denial-marker behavior, baseline variance, and body-length changes.
+ * denial-marker behavior, baseline variance, paired controls, and body-length changes.
  */
 public class ResponseAnalyzer {
 
@@ -83,12 +83,12 @@ public class ResponseAnalyzer {
     }
 
     /**
-     * Analyze one mutated response.
+     * Analyze one mutated response against the calibrated denied baseline.
      */
     public Analysis analyze(String requestMethod, short status, int length, String body,
                             boolean hide404, boolean hide403) {
         if ((hide404 && status == 404) || (hide403 && status == 403)) {
-            return new Analysis(ResultType.NORMAL, 0, 1.0, false,
+            return analysis(ResultType.NORMAL, 0, 1.0, false,
                     "Filtered by user configuration", false);
         }
 
@@ -145,8 +145,113 @@ public class ResponseAnalyzer {
         }
 
         boolean shouldLog = type != ResultType.NORMAL;
-        return new Analysis(type, clamp(confidence), similarity,
+        return analysis(type, clamp(confidence), similarity,
                 significantLengthDifference, rationale, shouldLog);
+    }
+
+    /**
+     * Analyze a mutation against both the denied baseline and a neutral paired
+     * control. This is used for techniques such as X-Original-URL path swapping,
+     * where the visible request path changes and a plain 200 response may simply
+     * be the normal response for that visible path.
+     */
+    public Analysis analyzeWithControl(String requestMethod,
+                                       short status, int length, String body,
+                                       short controlStatus, int controlLength, String controlBody,
+                                       boolean hide404, boolean hide403) {
+        Analysis baselineAnalysis = analyze(
+                requestMethod, status, length, body, hide404, hide403
+        );
+
+        double controlSimilarity = bodySimilarity(controlBody, body);
+        boolean controlLengthDifference = isSignificantAgainst(controlLength, length);
+        boolean sameControlStatus = status == controlStatus;
+        String method = normalizeMethod(requestMethod);
+
+        // A 2xx mutation that is effectively identical to the neutral control is
+        // not evidence of a bypass. The routing/header mutation was likely ignored.
+        if (status >= 200 && status < 300
+                && controlStatus >= 200 && controlStatus < 300
+                && sameControlStatus
+                && controlSimilarity >= 0.90
+                && !controlLengthDifference) {
+            return new Analysis(
+                    ResultType.CONTROL_MATCH,
+                    0,
+                    baselineAnalysis.bodySimilarity(),
+                    baselineAnalysis.significantLengthDifference(),
+                    "Candidate matches neutral paired control; bypass signal was likely ignored",
+                    false,
+                    true,
+                    controlSimilarity,
+                    controlStatus
+            );
+        }
+
+        ResultType type = baselineAnalysis.type();
+        int confidence = baselineAnalysis.confidence();
+        String rationale = baselineAnalysis.rationale();
+
+        // For ordinary 2xx methods, a response that differs from the neutral
+        // control is positive differential evidence. Conversely, a near-match
+        // reduces confidence even when it is not similar enough to suppress.
+        if (baselineStatus >= 400 && status >= 200 && status < 300
+                && !INFORMATIONAL_METHODS.contains(method)) {
+            if (controlStatus < 200 || controlStatus >= 300) confidence += 20;
+
+            if (controlSimilarity < 0.35) confidence += 25;
+            else if (controlSimilarity < 0.70) confidence += 15;
+            else if (controlSimilarity < 0.90) confidence += 5;
+            else if (controlSimilarity >= 0.97) confidence -= 25;
+
+            if (controlLengthDifference) confidence += 10;
+            if (!sameControlStatus) confidence += 10;
+
+            confidence = clamp(confidence);
+            if (confidence >= 60) {
+                type = ResultType.BYPASS_CANDIDATE;
+            } else if (type == ResultType.BYPASS_CANDIDATE) {
+                type = ResultType.STATUS_ANOMALY;
+            }
+        } else if (type == ResultType.REDIRECT) {
+            // Do not suppress redirects from body similarity alone because the
+            // Location header is not part of the v8 Slice 2 comparator yet.
+            if (!sameControlStatus) confidence += 10;
+            if (controlSimilarity < 0.70) confidence += 10;
+            confidence = Math.min(55, clamp(confidence));
+        }
+
+        rationale = rationale
+                + "; paired control status=" + controlStatus
+                + ", body similarity=" + Math.round(controlSimilarity * 100.0) + "%";
+
+        return new Analysis(
+                type,
+                confidence,
+                baselineAnalysis.bodySimilarity(),
+                baselineAnalysis.significantLengthDifference(),
+                rationale,
+                baselineAnalysis.shouldLog(),
+                true,
+                controlSimilarity,
+                controlStatus
+        );
+    }
+
+    private static Analysis analysis(ResultType type, int confidence, double bodySimilarity,
+                                     boolean significantLengthDifference, String rationale,
+                                     boolean shouldLog) {
+        return new Analysis(
+                type,
+                confidence,
+                bodySimilarity,
+                significantLengthDifference,
+                rationale,
+                shouldLog,
+                false,
+                -1.0,
+                -1
+        );
     }
 
     /**
@@ -293,7 +398,10 @@ public class ResponseAnalyzer {
             double bodySimilarity,
             boolean significantLengthDifference,
             String rationale,
-            boolean shouldLog
+            boolean shouldLog,
+            boolean controlCompared,
+            double controlSimilarity,
+            int controlStatus
     ) {
         public boolean interesting() {
             return type == ResultType.BYPASS_CANDIDATE || type == ResultType.REDIRECT;
@@ -303,6 +411,8 @@ public class ResponseAnalyzer {
     public enum ResultType {
         /** Strong differential signal, but still requires manual authorization validation. */
         BYPASS_CANDIDATE,
+        /** Mutation response matched its neutral paired control and is treated as noise. */
+        CONTROL_MATCH,
         /** 3xx transition from a denied baseline. */
         REDIRECT,
         /** 2xx caused by methods such as HEAD/OPTIONS/TRACE/CONNECT. */
