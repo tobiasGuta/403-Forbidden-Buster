@@ -1,7 +1,9 @@
 package com.bughunter;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -11,7 +13,7 @@ import java.util.regex.Pattern;
  *
  * A status transition alone is never treated as proof of an authorization bypass.
  * The analyzer combines status, method semantics, normalized body similarity,
- * denial-marker behavior, and body-length changes to classify results.
+ * denial-marker behavior, baseline variance, and body-length changes.
  */
 public class ResponseAnalyzer {
 
@@ -45,9 +47,10 @@ public class ResponseAnalyzer {
     private final short baselineStatus;
     private final int baselineLength;
     private final String baselineMethod;
-    private final String normalizedBaselineBody;
-    private final Set<String> baselineTokens;
-    private final boolean baselineHasDenialMarker;
+    private final List<Integer> baselineLengths = new ArrayList<>();
+    private final List<String> normalizedBaselineBodies = new ArrayList<>();
+    private final List<Set<String>> baselineTokenSets = new ArrayList<>();
+    private boolean baselineHasDenialMarker;
 
     public ResponseAnalyzer(short baselineStatus, int baselineLength) {
         this(baselineStatus, baselineLength, "", "GET");
@@ -57,9 +60,26 @@ public class ResponseAnalyzer {
         this.baselineStatus = baselineStatus;
         this.baselineLength = baselineLength;
         this.baselineMethod = normalizeMethod(baselineMethod);
-        this.normalizedBaselineBody = normalizeBody(baselineBody);
-        this.baselineTokens = tokenize(normalizedBaselineBody);
-        this.baselineHasDenialMarker = containsDenialMarker(normalizedBaselineBody);
+        addBaselineData(baselineLength, baselineBody);
+    }
+
+    /**
+     * Adds another unchanged baseline response. Returns false if its status does
+     * not match the original baseline, because mixing authorization states would
+     * make later comparisons unreliable.
+     */
+    public boolean addBaselineSample(short status, int length, String body) {
+        if (status != baselineStatus) return false;
+        addBaselineData(length, body);
+        return true;
+    }
+
+    private void addBaselineData(int length, String body) {
+        String normalized = normalizeBody(body);
+        baselineLengths.add(length);
+        normalizedBaselineBodies.add(normalized);
+        baselineTokenSets.add(tokenize(normalized));
+        baselineHasDenialMarker = baselineHasDenialMarker || containsDenialMarker(normalized);
     }
 
     /**
@@ -74,7 +94,7 @@ public class ResponseAnalyzer {
 
         String method = normalizeMethod(requestMethod);
         String normalizedBody = normalizeBody(body);
-        double similarity = bodySimilarity(normalizedBaselineBody, baselineTokens, normalizedBody);
+        double similarity = bodySimilarityToBaselines(normalizedBody);
         boolean significantLengthDifference = isSignificantLengthDifference(length);
         boolean currentHasDenialMarker = containsDenialMarker(normalizedBody);
         boolean denialMarkerDisappeared = baselineHasDenialMarker && !currentHasDenialMarker;
@@ -114,14 +134,14 @@ public class ResponseAnalyzer {
         } else if (similarity < 0.80) {
             type = ResultType.BODY_ANOMALY;
             confidence = similarity < 0.40 ? 35 : 20;
-            rationale = "Response body differs materially from baseline";
+            rationale = "Response body differs materially from all baseline samples";
         } else if (significantLengthDifference) {
             type = ResultType.LENGTH_ANOMALY;
             confidence = 15;
-            rationale = "Response length differs materially from baseline";
+            rationale = "Response length differs materially from all baseline samples";
         } else {
             type = ResultType.NORMAL;
-            rationale = "No meaningful difference from baseline";
+            rationale = "No meaningful difference from calibrated baseline";
         }
 
         boolean shouldLog = type != ResultType.NORMAL;
@@ -143,10 +163,39 @@ public class ResponseAnalyzer {
         return analyze(baselineMethod, status, length, "", false, false).type();
     }
 
+    /**
+     * A candidate length is considered anomalous only when it falls outside the
+     * tolerated range of every captured baseline sample.
+     */
     public boolean isSignificantLengthDifference(int length) {
-        int diff = Math.abs(length - baselineLength);
-        double pctDiff = baselineLength > 0 ? (double) diff / baselineLength : (diff > 0 ? 1.0 : 0.0);
+        for (int sampleLength : baselineLengths) {
+            if (!isSignificantAgainst(sampleLength, length)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isSignificantAgainst(int referenceLength, int candidateLength) {
+        int diff = Math.abs(candidateLength - referenceLength);
+        double pctDiff = referenceLength > 0
+                ? (double) diff / referenceLength
+                : (diff > 0 ? 1.0 : 0.0);
         return diff > 100 || pctDiff > 0.10;
+    }
+
+    private double bodySimilarityToBaselines(String normalizedCandidate) {
+        double best = 0.0;
+        for (int i = 0; i < normalizedBaselineBodies.size(); i++) {
+            double similarity = bodySimilarity(
+                    normalizedBaselineBodies.get(i),
+                    baselineTokenSets.get(i),
+                    normalizedCandidate
+            );
+            if (similarity > best) best = similarity;
+            if (best >= 1.0) return 1.0;
+        }
+        return best;
     }
 
     private int score2xxTransition(String method, short status, double similarity,
@@ -236,6 +285,7 @@ public class ResponseAnalyzer {
     public short getBaselineStatus() { return baselineStatus; }
     public int getBaselineLength() { return baselineLength; }
     public String getBaselineMethod() { return baselineMethod; }
+    public int getBaselineSampleCount() { return baselineLengths.size(); }
 
     public record Analysis(
             ResultType type,
