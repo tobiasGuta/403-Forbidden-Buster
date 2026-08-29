@@ -39,7 +39,8 @@ public class AttackConfig {
     private final List<String> userPaths;
 
     /**
-     * Backward-compatible constructor. v8 defaults to Safe Mode on a GET target.
+     * UI-compatible constructor. The per-target execution mode is deliberately
+     * ephemeral and comes from the current Burp context-menu selection.
      */
     public AttackConfig(boolean ipSpoofing, boolean pathSwapping, boolean hopByHop,
                         boolean pathObfuscation, boolean methodTampering, boolean protocolDowngrade,
@@ -51,12 +52,12 @@ public class AttackConfig {
         this(ipSpoofing, pathSwapping, hopByHop, pathObfuscation, methodTampering,
                 protocolDowngrade, suffixAttacks, hide404, hide403, caseSwitch,
                 unicodeNormalization, backslashBypass, headerInjection,
-                false, "GET",
+                ActiveMethodsRegistry.isActiveMethodsEnabled(), ActiveMethodsRegistry.targetMethod(),
                 delayMs, threadCount, ipListRaw, pathListRaw);
     }
 
     /**
-     * Compatibility constructor for callers that already opt into Active Methods.
+     * Compatibility constructor for callers that explicitly choose the mode.
      */
     public AttackConfig(boolean ipSpoofing, boolean pathSwapping, boolean hopByHop,
                         boolean pathObfuscation, boolean methodTampering, boolean protocolDowngrade,
@@ -114,7 +115,7 @@ public class AttackConfig {
 
         if (isSafeMode() && !RequestSafetyPolicy.isSafeAutomaticMethod(targetMethod)) {
             errors.add("Safe Mode will not transmit a " + targetMethod
-                    + " target. Enable Active Methods explicitly for non-GET/HEAD/OPTIONS requests.");
+                    + " target. Choose the Active Methods context-menu action explicitly for non-GET/HEAD/OPTIONS requests.");
         }
 
         boolean anyEnabled = isIpSpoofing() || isPathSwapping() || isHopByHop()
@@ -123,7 +124,7 @@ public class AttackConfig {
                 || isBackslashBypass() || isHeaderInjection();
         if (!anyEnabled)
             errors.add(isSafeMode()
-                    ? "No Safe Mode techniques are enabled. Method Tampering and Header Injection require Active Methods."
+                    ? "No Safe Mode techniques are enabled. Method Tampering and the mixed Header Injection category require Active Methods."
                     : "At least one attack technique must be enabled.");
         return errors;
     }
