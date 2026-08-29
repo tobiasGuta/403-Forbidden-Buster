@@ -1,80 +1,271 @@
 package com.bughunter;
 
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Pattern;
+
 /**
- * Analyzes HTTP responses to determine if a bypass was successful.
- * Compares against the baseline (original 403/401) to detect meaningful changes
- * and filter false positives.
+ * Accuracy-focused HTTP response analyzer for v8.
+ *
+ * A status transition alone is never treated as proof of an authorization bypass.
+ * The analyzer combines status, method semantics, normalized body similarity,
+ * denial-marker behavior, and body-length changes to classify results.
  */
 public class ResponseAnalyzer {
 
+    private static final Set<String> INFORMATIONAL_METHODS = Set.of(
+            "HEAD", "OPTIONS", "TRACE", "CONNECT"
+    );
+
+    private static final String[] DENIAL_MARKERS = {
+            "forbidden",
+            "access denied",
+            "unauthorized",
+            "not authorized",
+            "permission denied",
+            "authentication required",
+            "insufficient privileges"
+    };
+
+    private static final Pattern HTML_TAGS = Pattern.compile("<[^>]+>");
+    private static final Pattern UUID = Pattern.compile(
+            "\\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern ISO_TIMESTAMP = Pattern.compile(
+            "\\b\\d{4}-\\d{2}-\\d{2}[tT ][0-9:.+-]+(?:[zZ])?\\b"
+    );
+    private static final Pattern LONG_HEX = Pattern.compile("\\b[0-9a-f]{16,}\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LONG_NUMBER = Pattern.compile("\\b\\d{6,}\\b");
+    private static final Pattern NON_WORD = Pattern.compile("[^a-z0-9_<>]+", Pattern.CASE_INSENSITIVE);
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+
     private final short baselineStatus;
     private final int baselineLength;
+    private final String baselineMethod;
+    private final String normalizedBaselineBody;
+    private final Set<String> baselineTokens;
+    private final boolean baselineHasDenialMarker;
 
     public ResponseAnalyzer(short baselineStatus, int baselineLength) {
+        this(baselineStatus, baselineLength, "", "GET");
+    }
+
+    public ResponseAnalyzer(short baselineStatus, int baselineLength, String baselineBody, String baselineMethod) {
         this.baselineStatus = baselineStatus;
         this.baselineLength = baselineLength;
+        this.baselineMethod = normalizeMethod(baselineMethod);
+        this.normalizedBaselineBody = normalizeBody(baselineBody);
+        this.baselineTokens = tokenize(normalizedBaselineBody);
+        this.baselineHasDenialMarker = containsDenialMarker(normalizedBaselineBody);
     }
 
     /**
-     * Determines if a response should be logged as interesting.
-     *
-     * @param status    HTTP status code of the response
-     * @param length    Body length of the response
-     * @param hide404   Whether to suppress 404 responses
-     * @param hide403   Whether to suppress 403 responses
-     * @return true if the response should be shown to the user
+     * Analyze one mutated response.
+     */
+    public Analysis analyze(String requestMethod, short status, int length, String body,
+                            boolean hide404, boolean hide403) {
+        if ((hide404 && status == 404) || (hide403 && status == 403)) {
+            return new Analysis(ResultType.NORMAL, 0, 1.0, false,
+                    "Filtered by user configuration", false);
+        }
+
+        String method = normalizeMethod(requestMethod);
+        String normalizedBody = normalizeBody(body);
+        double similarity = bodySimilarity(normalizedBaselineBody, baselineTokens, normalizedBody);
+        boolean significantLengthDifference = isSignificantLengthDifference(length);
+        boolean currentHasDenialMarker = containsDenialMarker(normalizedBody);
+        boolean denialMarkerDisappeared = baselineHasDenialMarker && !currentHasDenialMarker;
+        boolean bodyIsEmpty = normalizedBody.isBlank();
+
+        ResultType type;
+        int confidence = 0;
+        String rationale;
+
+        if (status >= 500) {
+            type = ResultType.ERROR;
+            rationale = "Server error response";
+        } else if (baselineStatus >= 400 && status >= 200 && status < 300) {
+            confidence = score2xxTransition(method, status, similarity,
+                    significantLengthDifference, denialMarkerDisappeared, bodyIsEmpty);
+
+            if (INFORMATIONAL_METHODS.contains(method)) {
+                type = ResultType.METHOD_BEHAVIOR;
+                rationale = method + " returned 2xx; method semantics require manual validation";
+            } else if (confidence >= 60) {
+                type = ResultType.BYPASS_CANDIDATE;
+                rationale = "2xx plus meaningful response differences; manual authorization validation required";
+            } else {
+                type = ResultType.STATUS_ANOMALY;
+                rationale = "2xx transition without enough evidence to call a bypass candidate";
+            }
+        } else if (baselineStatus >= 400 && status >= 300 && status < 400) {
+            type = ResultType.REDIRECT;
+            confidence = Math.min(45, 15 + (similarity < 0.70 ? 15 : 0)
+                    + (denialMarkerDisappeared ? 10 : 0)
+                    + (significantLengthDifference ? 5 : 0));
+            rationale = "Redirect from a denied baseline; destination must be inspected manually";
+        } else if (status != baselineStatus) {
+            type = ResultType.STATUS_ANOMALY;
+            confidence = 15;
+            rationale = "HTTP status differs from baseline";
+        } else if (similarity < 0.80) {
+            type = ResultType.BODY_ANOMALY;
+            confidence = similarity < 0.40 ? 35 : 20;
+            rationale = "Response body differs materially from baseline";
+        } else if (significantLengthDifference) {
+            type = ResultType.LENGTH_ANOMALY;
+            confidence = 15;
+            rationale = "Response length differs materially from baseline";
+        } else {
+            type = ResultType.NORMAL;
+            rationale = "No meaningful difference from baseline";
+        }
+
+        boolean shouldLog = type != ResultType.NORMAL;
+        return new Analysis(type, clamp(confidence), similarity,
+                significantLengthDifference, rationale, shouldLog);
+    }
+
+    /**
+     * Retained for compatibility with older callers.
      */
     public boolean shouldLog(short status, int length, boolean hide404, boolean hide403) {
-        if (hide404 && status == 404) return false;
-        if (hide403 && status == 403) return false;
+        return analyze(baselineMethod, status, length, "", hide404, hide403).shouldLog();
+    }
 
-        // Status changed — always interesting
-        if (status != baselineStatus) return true;
+    /**
+     * Retained for compatibility with older callers.
+     */
+    public ResultType classify(short status, int length) {
+        return analyze(baselineMethod, status, length, "", false, false).type();
+    }
 
-        // Same status but significant length difference (>10% or >100 bytes)
+    public boolean isSignificantLengthDifference(int length) {
         int diff = Math.abs(length - baselineLength);
-        double pctDiff = baselineLength > 0 ? (double) diff / baselineLength : diff;
+        double pctDiff = baselineLength > 0 ? (double) diff / baselineLength : (diff > 0 ? 1.0 : 0.0);
         return diff > 100 || pctDiff > 0.10;
     }
 
-    /**
-     * Classifies how interesting a response is compared to baseline.
-     *
-     * @param status HTTP status code
-     * @param length Body length
-     * @return Classification: BYPASS, REDIRECT, ERROR, LENGTH_ANOMALY, NORMAL
-     */
-    public ResultType classify(short status, int length) {
-        if (status >= 200 && status < 300 && baselineStatus >= 400) {
-            return ResultType.BYPASS;
+    private int score2xxTransition(String method, short status, double similarity,
+                                   boolean significantLengthDifference,
+                                   boolean denialMarkerDisappeared,
+                                   boolean bodyIsEmpty) {
+        int score = 35;
+
+        if (method.equals(baselineMethod)) {
+            score += 15;
+        } else if (INFORMATIONAL_METHODS.contains(method)) {
+            score -= 30;
+        } else {
+            score += 5;
         }
-        if (status >= 300 && status < 400 && baselineStatus >= 400) {
-            return ResultType.REDIRECT;
+
+        if (similarity < 0.35) score += 25;
+        else if (similarity < 0.70) score += 15;
+        else if (similarity < 0.90) score += 5;
+        else if (similarity >= 0.97) score -= 15;
+
+        if (denialMarkerDisappeared) score += 15;
+        if (significantLengthDifference) score += 10;
+        if (bodyIsEmpty) score -= 20;
+        if (status == 204) score -= 20;
+
+        return clamp(score);
+    }
+
+    private static int clamp(int value) {
+        return Math.max(0, Math.min(100, value));
+    }
+
+    private static String normalizeMethod(String method) {
+        return method == null ? "" : method.trim().toUpperCase(Locale.ROOT);
+    }
+
+    static String normalizeBody(String body) {
+        if (body == null || body.isBlank()) return "";
+
+        String normalized = body.toLowerCase(Locale.ROOT);
+        normalized = HTML_TAGS.matcher(normalized).replaceAll(" ");
+        normalized = UUID.matcher(normalized).replaceAll(" <uuid> ");
+        normalized = ISO_TIMESTAMP.matcher(normalized).replaceAll(" <timestamp> ");
+        normalized = LONG_HEX.matcher(normalized).replaceAll(" <hex> ");
+        normalized = LONG_NUMBER.matcher(normalized).replaceAll(" <number> ");
+        normalized = NON_WORD.matcher(normalized).replaceAll(" ");
+        return WHITESPACE.matcher(normalized).replaceAll(" ").trim();
+    }
+
+    private static Set<String> tokenize(String normalizedBody) {
+        if (normalizedBody == null || normalizedBody.isBlank()) return Set.of();
+        return new HashSet<>(Arrays.asList(normalizedBody.split(" ")));
+    }
+
+    static double bodySimilarity(String baselineBody, String candidateBody) {
+        String normalizedBaseline = normalizeBody(baselineBody);
+        return bodySimilarity(normalizedBaseline, tokenize(normalizedBaseline), normalizeBody(candidateBody));
+    }
+
+    private static double bodySimilarity(String normalizedBaseline, Set<String> baselineTokenSet,
+                                         String normalizedCandidate) {
+        if (normalizedBaseline.isEmpty() && normalizedCandidate.isEmpty()) return 1.0;
+        if (normalizedBaseline.isEmpty() || normalizedCandidate.isEmpty()) return 0.0;
+        if (normalizedBaseline.equals(normalizedCandidate)) return 1.0;
+
+        Set<String> candidateTokens = tokenize(normalizedCandidate);
+        if (baselineTokenSet.isEmpty() || candidateTokens.isEmpty()) return 0.0;
+
+        Set<String> intersection = new HashSet<>(baselineTokenSet);
+        intersection.retainAll(candidateTokens);
+
+        Set<String> union = new HashSet<>(baselineTokenSet);
+        union.addAll(candidateTokens);
+
+        return union.isEmpty() ? 1.0 : (double) intersection.size() / union.size();
+    }
+
+    private static boolean containsDenialMarker(String normalizedBody) {
+        if (normalizedBody == null || normalizedBody.isBlank()) return false;
+        for (String marker : DENIAL_MARKERS) {
+            if (normalizedBody.contains(marker)) return true;
         }
-        if (status >= 500) {
-            return ResultType.ERROR;
-        }
-        // Same status but length anomaly
-        int diff = Math.abs(length - baselineLength);
-        if (diff > 100 && status == baselineStatus) {
-            return ResultType.LENGTH_ANOMALY;
-        }
-        return ResultType.NORMAL;
+        return false;
     }
 
     public short getBaselineStatus() { return baselineStatus; }
     public int getBaselineLength() { return baselineLength; }
+    public String getBaselineMethod() { return baselineMethod; }
+
+    public record Analysis(
+            ResultType type,
+            int confidence,
+            double bodySimilarity,
+            boolean significantLengthDifference,
+            String rationale,
+            boolean shouldLog
+    ) {
+        public boolean interesting() {
+            return type == ResultType.BYPASS_CANDIDATE || type == ResultType.REDIRECT;
+        }
+    }
 
     public enum ResultType {
-        /** Status changed from 4xx to 2xx — confirmed bypass */
-        BYPASS,
-        /** Status changed from 4xx to 3xx — potential bypass via redirect */
+        /** Strong differential signal, but still requires manual authorization validation. */
+        BYPASS_CANDIDATE,
+        /** 3xx transition from a denied baseline. */
         REDIRECT,
-        /** Server error — worth investigating */
+        /** 2xx caused by methods such as HEAD/OPTIONS/TRACE/CONNECT. */
+        METHOD_BEHAVIOR,
+        /** 5xx server response. */
         ERROR,
-        /** Same status but body length significantly changed */
+        /** Same status but semantically different response body. */
+        BODY_ANOMALY,
+        /** Same status but materially different body length. */
         LENGTH_ANOMALY,
-        /** No meaningful difference from baseline */
+        /** Status changed, but evidence is insufficient for a bypass candidate. */
+        STATUS_ANOMALY,
+        /** No meaningful difference from baseline. */
         NORMAL
     }
 }
