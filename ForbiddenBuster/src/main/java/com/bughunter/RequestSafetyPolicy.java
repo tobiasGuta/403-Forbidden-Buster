@@ -4,8 +4,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Central v8 policy for deciding which HTTP methods are eligible for automatic
- * transmission while Safe Mode is enabled.
+ * Central v8 policy for deciding which HTTP methods are eligible while Safe Mode is enabled.
  */
 final class RequestSafetyPolicy {
 
@@ -16,5 +15,13 @@ final class RequestSafetyPolicy {
     static boolean isSafeAutomaticMethod(String method) {
         if (method == null) return false;
         return SAFE_METHODS.contains(method.trim().toUpperCase(Locale.ROOT));
+    }
+
+    static boolean isAllowedByMode(String method, boolean activeMethodsEnabled) {
+        return activeMethodsEnabled || isSafeAutomaticMethod(method);
+    }
+
+    static boolean isAllowedByCurrentMode(String method) {
+        return isAllowedByMode(method, ActiveMethodsRegistry.isActiveMethodsEnabled());
     }
 }
