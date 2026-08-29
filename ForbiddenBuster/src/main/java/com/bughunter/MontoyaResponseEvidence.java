@@ -55,6 +55,7 @@ final class MontoyaResponseEvidence {
 
     private final Http http;
     private final List<HttpResponse> baselineResponses = new ArrayList<>();
+    private BaselineProfile cachedProfile;
 
     MontoyaResponseEvidence(Http http, HttpResponse capturedBaseline) {
         this.http = http;
@@ -62,29 +63,29 @@ final class MontoyaResponseEvidence {
     }
 
     synchronized void addBaseline(HttpResponse response) {
-        if (response != null) baselineResponses.add(response);
+        if (response != null) {
+            baselineResponses.add(response);
+            cachedProfile = null;
+        }
     }
 
     synchronized int baselineSampleCount() {
         return baselineResponses.size();
     }
 
-    synchronized Evidence compare(HttpResponse candidate, HttpResponse control) {
+    Evidence compare(HttpResponse candidate, HttpResponse control) {
         if (candidate == null) return Evidence.unavailable("No candidate response was available");
 
         try {
-            List<HttpResponse> baselines = List.copyOf(baselineResponses);
-            Set<AttributeType> stableBaselineAttributes = invariantAttributes(baselines);
-            Set<String> stableBaselineKeywords = invariantKeywords(baselines);
-
-            List<HttpResponse> candidateSeries = new ArrayList<>(baselines);
+            BaselineProfile profile = baselineProfile();
+            List<HttpResponse> candidateSeries = new ArrayList<>(profile.responses());
             candidateSeries.add(candidate);
 
             Set<AttributeType> candidateVariants = relevant(variantAttributes(candidateSeries));
-            candidateVariants.retainAll(stableBaselineAttributes);
+            candidateVariants.retainAll(profile.stableAttributes());
 
             Set<String> denialKeywordVariants = new LinkedHashSet<>(variantKeywords(candidateSeries));
-            denialKeywordVariants.retainAll(stableBaselineKeywords);
+            denialKeywordVariants.retainAll(profile.stableKeywords());
 
             Set<AttributeType> controlVariants = Set.of();
             Set<String> controlKeywordVariants = Set.of();
@@ -109,6 +110,18 @@ final class MontoyaResponseEvidence {
         } catch (RuntimeException e) {
             return Evidence.unavailable("Montoya semantic analysis unavailable: " + safeMessage(e));
         }
+    }
+
+    private synchronized BaselineProfile baselineProfile() {
+        if (cachedProfile != null) return cachedProfile;
+
+        List<HttpResponse> responses = List.copyOf(baselineResponses);
+        cachedProfile = new BaselineProfile(
+                responses,
+                Set.copyOf(invariantAttributes(responses)),
+                Set.copyOf(invariantKeywords(responses))
+        );
+        return cachedProfile;
     }
 
     private Set<AttributeType> invariantAttributes(List<HttpResponse> responses) {
@@ -155,6 +168,12 @@ final class MontoyaResponseEvidence {
         String message = e.getMessage();
         return message == null || message.isBlank() ? e.getClass().getSimpleName() : message;
     }
+
+    private record BaselineProfile(
+            List<HttpResponse> responses,
+            Set<AttributeType> stableAttributes,
+            Set<String> stableKeywords
+    ) {}
 
     record Evidence(
             boolean available,
