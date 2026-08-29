@@ -119,6 +119,68 @@ class ResponseAnalyzerTest {
     }
 
     @Test
+    void identicalRedirectLocationMatchesPairedControlAndIsSuppressed() {
+        String denied = "Forbidden - access denied";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyzeWithControl(
+                "GET",
+                (short) 302, 0, "", "https://example.test/login#continue",
+                (short) 302, 0, "", "https://EXAMPLE.test:443/login",
+                false, false
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.CONTROL_MATCH, analysis.type());
+        assertEquals(0, analysis.confidence());
+        assertFalse(analysis.shouldLog());
+        assertTrue(analysis.rationale().contains("Redirect destination matches paired control"));
+    }
+
+    @Test
+    void loginRedirectIsKeptLowConfidence() {
+        String denied = "Forbidden - access denied";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyze(
+                "GET", (short) 302, 0, "", "/login?next=%2Fadmin", false, false);
+
+        assertEquals(ResponseAnalyzer.ResultType.REDIRECT, analysis.type());
+        assertTrue(analysis.confidence() <= 15);
+        assertTrue(analysis.rationale().contains("authentication/denial-like"));
+    }
+
+    @Test
+    void redirectThatDiffersFromLoginControlRemainsManualInspectionSignal() {
+        String denied = "Forbidden - access denied";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis analysis = analyzer.analyzeWithControl(
+                "GET",
+                (short) 302, 0, "", "/admin/dashboard",
+                (short) 302, 0, "", "/login",
+                false, false
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.REDIRECT, analysis.type());
+        assertTrue(analysis.shouldLog());
+        assertTrue(analysis.confidence() > 15);
+        assertTrue(analysis.rationale().contains("control Location=/login"));
+    }
+
+    @Test
+    void redirectLocationNormalizationDropsFragmentsAndDefaultPorts() {
+        assertTrue(ResponseAnalyzer.locationsEquivalent(
+                "https://EXAMPLE.test:443/login#step-two",
+                "https://example.test/login"
+        ));
+        assertFalse(ResponseAnalyzer.locationsEquivalent(
+                "/admin?view=users",
+                "/admin?view=settings"
+        ));
+        assertEquals("/login?next=%2Fadmin", ResponseAnalyzer.normalizeLocation(" /login?next=%2Fadmin#frag "));
+    }
+
+    @Test
     void twoHundredWithSameDenialBodyIsOnlyStatusAnomaly() {
         String denied = "Forbidden - access denied";
         ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
