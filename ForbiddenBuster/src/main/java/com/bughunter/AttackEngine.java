@@ -13,11 +13,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Manages attack execution with thread pool, pause/resume/stop controls,
  * global rate limiting, calibrated v8 response analysis, paired controls,
- * and progress reporting.
+ * safe candidate revalidation, and progress reporting.
  */
 public class AttackEngine {
 
     private static final int SAFE_GET_BASELINE_REPLAYS = 2;
+    private static final int SAFE_CANDIDATE_REPLAYS = 2;
 
     public interface AttackListener {
         void onResult(BypassResult result);
@@ -36,7 +37,7 @@ public class AttackEngine {
     private ExecutorService executor;
     private Thread coordinatorThread;
 
-    // Global rate limiter — shared across calibration, controls, and attack workers.
+    // Global rate limiter — shared across calibration, controls, revalidation, and attack workers.
     private volatile long lastRequestTimeMs = 0;
     private final Object rateLock = new Object();
 
@@ -188,31 +189,54 @@ public class AttackEngine {
                     int length = response.response().body().length();
                     String body = response.response().bodyToString();
 
-                    ResponseAnalyzer.Analysis analysis;
-                    if (controlResponse != null) {
-                        analysis = analyzer.analyzeWithControl(
-                                payload.request.method(),
-                                statusCode,
-                                length,
-                                body,
-                                controlResponse.response().statusCode(),
-                                controlResponse.response().body().length(),
-                                controlResponse.response().bodyToString(),
-                                config.isHide404(),
-                                config.isHide403()
-                        );
-                    } else {
-                        analysis = analyzer.analyze(
-                                payload.request.method(),
-                                statusCode,
-                                length,
-                                body,
-                                config.isHide404(),
-                                config.isHide403()
-                        );
-                    }
+                    ResponseAnalyzer.Analysis analysis = analyzeResponse(
+                            analyzer,
+                            payload,
+                            response,
+                            controlResponse,
+                            config
+                    );
 
                     if (analysis.shouldLog()) {
+                        CandidateRevalidation.Summary revalidation;
+                        if (analysis.type() == ResponseAnalyzer.ResultType.BYPASS_CANDIDATE) {
+                            if (isSafeAutomaticRevalidationMethod(payload.request)) {
+                                revalidation = revalidateCandidate(
+                                        payload,
+                                        plan,
+                                        analyzer,
+                                        response,
+                                        analysis,
+                                        config
+                                );
+                                if (revalidation == null) return;
+                            } else {
+                                revalidation = CandidateRevalidation.Summary.skipped(
+                                        analysis.type(),
+                                        analysis.confidence(),
+                                        "Automatic revalidation skipped for " + payload.request.method()
+                                                + " to avoid repeated state-changing requests"
+                                );
+                            }
+                        } else {
+                            revalidation = CandidateRevalidation.Summary.skipped(
+                                    analysis.type(),
+                                    analysis.confidence(),
+                                    "Revalidation not required for " + analysis.type()
+                            );
+                        }
+
+                        ResponseAnalyzer.ResultType finalClassification = revalidation.attempted()
+                                ? revalidation.classification()
+                                : analysis.type();
+                        int finalConfidence = revalidation.attempted()
+                                ? revalidation.confidence()
+                                : analysis.confidence();
+                        String finalRationale = analysis.rationale();
+                        if (analysis.type() == ResponseAnalyzer.ResultType.BYPASS_CANDIDATE) {
+                            finalRationale = finalRationale + "; " + revalidation.rationale();
+                        }
+
                         BypassResult result = new BypassResult(
                                 idCounter.getAndIncrement(),
                                 payload.request.method(),
@@ -222,14 +246,18 @@ public class AttackEngine {
                                 statusCode,
                                 length,
                                 response,
-                                analysis.type(),
-                                analysis.confidence(),
+                                finalClassification,
+                                finalConfidence,
                                 analysis.bodySimilarity(),
-                                analysis.rationale(),
+                                finalRationale,
                                 controlResponse,
                                 analysis.controlCompared(),
                                 analysis.controlStatus(),
-                                analysis.controlSimilarity()
+                                analysis.controlSimilarity(),
+                                revalidation.attempted(),
+                                revalidation.consistentPasses(),
+                                revalidation.totalSamples(),
+                                revalidation.rationale()
                         );
                         listener.onResult(result);
                     }
@@ -258,6 +286,100 @@ public class AttackEngine {
             Thread.currentThread().interrupt();
             executor.shutdownNow();
         }
+    }
+
+    private ResponseAnalyzer.Analysis analyzeResponse(ResponseAnalyzer analyzer,
+                                                      PayloadGenerator.Payload payload,
+                                                      HttpRequestResponse response,
+                                                      HttpRequestResponse controlResponse,
+                                                      AttackConfig config) {
+        short statusCode = response.response().statusCode();
+        int length = response.response().body().length();
+        String body = response.response().bodyToString();
+
+        if (controlResponse != null) {
+            return analyzer.analyzeWithControl(
+                    payload.request.method(),
+                    statusCode,
+                    length,
+                    body,
+                    controlResponse.response().statusCode(),
+                    controlResponse.response().body().length(),
+                    controlResponse.response().bodyToString(),
+                    config.isHide404(),
+                    config.isHide403()
+            );
+        }
+
+        return analyzer.analyze(
+                payload.request.method(),
+                statusCode,
+                length,
+                body,
+                config.isHide404(),
+                config.isHide403()
+        );
+    }
+
+    /**
+     * Replays a high-signal safe candidate twice. Paired-control techniques get a
+     * fresh control before every replay, so repeatability means the differential
+     * itself remained stable rather than merely observing another 2xx response.
+     */
+    private CandidateRevalidation.Summary revalidateCandidate(PayloadGenerator.Payload payload,
+                                                               PairedControlPlanner.Plan plan,
+                                                               ResponseAnalyzer analyzer,
+                                                               HttpRequestResponse initialResponse,
+                                                               ResponseAnalyzer.Analysis initialAnalysis,
+                                                               AttackConfig config) {
+        List<CandidateRevalidation.Observation> observations = new ArrayList<>();
+        short initialStatus = initialResponse.response().statusCode();
+        String initialBody = initialResponse.response().bodyToString();
+
+        api.logging().logToOutput("[403 Buster] Revalidating candidate: "
+                + payload.description + " with " + SAFE_CANDIDATE_REPLAYS + " safe replay(s).");
+
+        for (int i = 0; i < SAFE_CANDIDATE_REPLAYS; i++) {
+            if (!isRunning) return null;
+
+            try {
+                HttpRequestResponse freshControl = null;
+                if (plan.requiresControl()) {
+                    freshControl = sendRateLimited(plan.controlRequest(), config.getDelayMs());
+                    if (freshControl == null) return null;
+                }
+
+                HttpRequestResponse replay = sendRateLimited(payload.request, config.getDelayMs());
+                if (replay == null) return null;
+
+                ResponseAnalyzer.Analysis replayAnalysis = analyzeResponse(
+                        analyzer,
+                        payload,
+                        replay,
+                        freshControl,
+                        config
+                );
+
+                observations.add(new CandidateRevalidation.Observation(
+                        replay.response().statusCode(),
+                        replay.response().bodyToString(),
+                        replayAnalysis
+                ));
+            } catch (Exception e) {
+                String message = "Candidate revalidation replay failed: " + e.getMessage();
+                listener.onError(payload.description, message);
+                api.logging().logToError("[403 Buster] " + message);
+                break;
+            }
+        }
+
+        return CandidateRevalidation.summarize(
+                initialStatus,
+                initialBody,
+                initialAnalysis,
+                observations,
+                SAFE_CANDIDATE_REPLAYS
+        );
     }
 
     /**
@@ -320,6 +442,10 @@ public class AttackEngine {
     private static boolean isSafeAutomaticControlMethod(HttpRequest request) {
         String method = request.method();
         return "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
+    }
+
+    private static boolean isSafeAutomaticRevalidationMethod(HttpRequest request) {
+        return "GET".equalsIgnoreCase(request.method());
     }
 
     /**
