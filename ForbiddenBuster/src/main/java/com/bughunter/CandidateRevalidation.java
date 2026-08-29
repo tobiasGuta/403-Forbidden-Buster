@@ -28,7 +28,8 @@ final class CandidateRevalidation {
         static Summary skipped(ResponseAnalyzer.ResultType classification,
                                int confidence,
                                String rationale) {
-            return new Summary(classification, confidence, false, 0, 1, rationale);
+            int initialPasses = classification == ResponseAnalyzer.ResultType.BYPASS_CANDIDATE ? 1 : 0;
+            return new Summary(classification, confidence, false, initialPasses, 1, rationale);
         }
     }
 
