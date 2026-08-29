@@ -3,6 +3,8 @@ package com.bughunter;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 
+import java.util.Objects;
+
 /**
  * Plans neutral paired controls for mutations that intentionally change the
  * visible request target. The control keeps the same visible request while
@@ -23,15 +25,19 @@ final class PairedControlPlanner {
 
         String originalTarget = baseline.request().path();
         for (String header : PATH_SWAP_HEADERS) {
-            String headerTarget = payload.request.headerValue(header);
-            if (headerTarget == null) continue;
+            String originalHeaderValue = baseline.request().headerValue(header);
+            String candidateHeaderValue = payload.request.headerValue(header);
+
+            // Ignore pre-existing routing headers that the payload did not alter.
+            if (Objects.equals(originalHeaderValue, candidateHeaderValue)) continue;
+            if (candidateHeaderValue == null) continue;
 
             // Target-specific bypass testing must continue to point at the
             // original protected resource. Dictionary swaps violate that
             // invariant and are therefore skipped rather than scored.
-            if (!sameSemanticTarget(originalTarget, headerTarget)) {
+            if (!sameSemanticTarget(originalTarget, candidateHeaderValue)) {
                 return Plan.skip(
-                        "Path-swap header targets " + headerTarget
+                        "Path-swap header targets " + candidateHeaderValue
                                 + " instead of protected target " + originalTarget
                 );
             }
@@ -39,7 +45,6 @@ final class PairedControlPlanner {
             // Neutralize only the mutation. If the captured baseline already
             // contained this routing header, restore its original value rather
             // than deleting legitimate request context.
-            String originalHeaderValue = baseline.request().headerValue(header);
             HttpRequest neutralControl = originalHeaderValue == null
                     ? payload.request.withRemovedHeader(header)
                     : payload.request.withHeader(header, originalHeaderValue);
@@ -52,7 +57,7 @@ final class PairedControlPlanner {
             );
         }
 
-        return Plan.skip("Path-swapping payload has no supported routing header");
+        return Plan.skip("Path-swapping payload did not change a supported routing header");
     }
 
     static boolean sameSemanticTarget(String originalTarget, String headerTarget) {
