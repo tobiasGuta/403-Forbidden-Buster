@@ -88,6 +88,45 @@ class CandidateRevalidationTest {
     }
 
     @Test
+    void pairedControlMatchOnReplayBreaksRepeatability() {
+        String denied = "Forbidden access denied";
+        String homepage = "public homepage news contact about products";
+        String admin = "admin dashboard billing users settings";
+        ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
+
+        ResponseAnalyzer.Analysis initial = analyzer.analyzeWithControl(
+                "GET",
+                (short) 200, admin.length(), admin,
+                (short) 200, homepage.length(), homepage,
+                false, false
+        );
+        assertEquals(ResponseAnalyzer.ResultType.BYPASS_CANDIDATE, initial.type());
+
+        ResponseAnalyzer.Analysis replay = analyzer.analyzeWithControl(
+                "GET",
+                (short) 200, homepage.length(), homepage,
+                (short) 200, homepage.length(), homepage,
+                false, false
+        );
+        assertEquals(ResponseAnalyzer.ResultType.CONTROL_MATCH, replay.type());
+
+        CandidateRevalidation.Summary summary = CandidateRevalidation.summarize(
+                (short) 200,
+                admin,
+                initial,
+                List.of(
+                        new CandidateRevalidation.Observation((short) 200, homepage, replay),
+                        new CandidateRevalidation.Observation((short) 200, homepage, replay)
+                ),
+                2
+        );
+
+        assertEquals(ResponseAnalyzer.ResultType.STATUS_ANOMALY, summary.classification());
+        assertEquals(1, summary.consistentPasses());
+        assertTrue(summary.confidence() <= 40);
+    }
+
+    @Test
     void nonCandidateIsNotRevalidated() {
         String denied = "Forbidden access denied";
         ResponseAnalyzer analyzer = new ResponseAnalyzer((short) 403, denied.length(), denied, "GET");
