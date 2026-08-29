@@ -12,36 +12,39 @@ import javax.swing.border.TitledBorder;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
 import java.awt.*;
-import java.io.*;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Complete Swing UI for 403 Forbidden Buster.
- * Three tabs: Monitor, Configuration, About.
- * Color-coded results, native Burp editors, CSV export, attack controls.
+ * Burp-native UI for 403 Forbidden Buster v8.
+ *
+ * The Monitor tab is evidence-first: the table exposes the highest-value triage
+ * signals and row selection reveals candidate traffic, neutral-control traffic,
+ * and the complete analyzer/revalidation rationale.
  */
 public class BusterUI implements AttackEngine.AttackListener {
 
-    // --- Color Constants ---
     private static final Color BYPASS_GREEN = new Color(144, 238, 144);
     private static final Color REDIRECT_ORANGE = new Color(255, 218, 185);
     private static final Color ERROR_RED = new Color(255, 182, 193);
     private static final Color ANOMALY_YELLOW = new Color(255, 255, 200);
-    private static final Color INTERESTING_BOLD_GREEN = new Color(76, 175, 80);
+    private static final Color MUTED_GRAY = new Color(238, 238, 238);
     private static final Color ACCENT = new Color(0xFF, 0x66, 0x33);
     private static final Font SECTION_TITLE = new Font("SansSerif", Font.BOLD, 11);
 
-    // --- Persistence Keys ---
     private static final String KEY_IPS = "buster.ips";
     private static final String KEY_PATHS = "buster.paths";
     private static final String KEY_DELAY = "buster.delay";
     private static final String KEY_THREADS = "buster.threads";
     private static final String KEY_PREFIX = "buster.chk.";
 
-    // --- Defaults ---
     static final String DEFAULT_IPS =
             "127.0.0.1\nlocalhost\n0.0.0.0\n192.168.0.1\n10.0.0.1\n::1\n127.0.0.2\n" +
             "192.168.1.1\n172.16.0.1\n10.10.10.1\n2130706433\n0x7f000001\n017700000001";
@@ -57,31 +60,46 @@ public class BusterUI implements AttackEngine.AttackListener {
     private final AttackEngine engine;
     private final ResultTableModel tableModel = new ResultTableModel();
 
-    // UI Root
     private JTabbedPane mainTabs;
 
-    // Monitor tab
     private HttpRequestEditor requestViewer;
     private HttpResponseEditor responseViewer;
-    private JButton runBtn, pauseBtn, stopBtn, clearBtn, exportBtn;
+    private HttpRequestEditor controlRequestViewer;
+    private HttpResponseEditor controlResponseViewer;
+    private JTextArea evidenceViewer;
+    private JTabbedPane detailTabs;
+    private JTabbedPane candidateTabs;
+    private JTabbedPane controlTabs;
+
+    private JButton runBtn;
+    private JButton pauseBtn;
+    private JButton stopBtn;
+    private JButton clearBtn;
+    private JButton exportBtn;
     private JProgressBar progressBar;
     private JLabel statusLabel;
     private JLabel targetLabel;
 
-    // Configuration tab
     private JTextArea ipConfigArea;
     private JTextArea pathConfigArea;
     private JSlider delaySlider;
     private JLabel delayLabel;
     private JSpinner threadSpinner;
 
-    // Toggles (attack techniques)
-    private JCheckBox chkIpSpoofing, chkPathSwapping, chkHopByHop, chkPathObf;
-    private JCheckBox chkMethods, chkProtocolDowngrade, chkSuffixes;
-    private JCheckBox chkHide404, chkHide403;
-    private JCheckBox chkCaseSwitch, chkUnicode, chkBackslash, chkHeaderInjection;
+    private JCheckBox chkIpSpoofing;
+    private JCheckBox chkPathSwapping;
+    private JCheckBox chkHopByHop;
+    private JCheckBox chkPathObf;
+    private JCheckBox chkMethods;
+    private JCheckBox chkProtocolDowngrade;
+    private JCheckBox chkSuffixes;
+    private JCheckBox chkHide404;
+    private JCheckBox chkHide403;
+    private JCheckBox chkCaseSwitch;
+    private JCheckBox chkUnicode;
+    private JCheckBox chkBackslash;
+    private JCheckBox chkHeaderInjection;
 
-    // State
     private volatile HttpRequestResponse targetRequest;
 
     public BusterUI(MontoyaApi api) {
@@ -100,12 +118,13 @@ public class BusterUI implements AttackEngine.AttackListener {
         String host = target.httpService().host();
         String path = target.request().path();
         short status = target.response().statusCode();
+        String mode = ActiveMethodsRegistry.isActiveMethodsEnabled() ? "ACTIVE METHODS" : "SAFE MODE";
         SwingUtilities.invokeLater(() -> {
-            targetLabel.setText("Target: " + host + path + " [" + status + "]");
+            targetLabel.setText("Target: " + host + path + " [" + status + "] — " + mode);
             targetLabel.setForeground(ACCENT);
             runBtn.setEnabled(!engine.isRunning());
         });
-        api.logging().logToOutput("[403 Buster] Target set: " + host + path);
+        api.logging().logToOutput("[403 Buster] Target set: " + host + path + " — " + mode);
     }
 
     public void saveSettings() {
@@ -129,78 +148,86 @@ public class BusterUI implements AttackEngine.AttackListener {
         preferences.setBoolean(KEY_PREFIX + "headerInj", chkHeaderInjection.isSelected());
     }
 
-    // =========================================================================
-    //  UI Construction
-    // =========================================================================
-
     private void buildUI() {
         mainTabs = new JTabbedPane();
         mainTabs.addTab("Monitor", buildMonitorTab());
         mainTabs.addTab("Configuration", buildConfigTab());
     }
 
-    // -------------------------------------------------------------------------
-    //  Tab 1: Monitor
-    // -------------------------------------------------------------------------
     private JComponent buildMonitorTab() {
         JPanel panel = new JPanel(new BorderLayout(0, 4));
         panel.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
-
-        // Top: Target + Controls
         panel.add(buildControlBar(), BorderLayout.NORTH);
 
-        // Center: Table + Editors split
         JTable table = new JTable(tableModel);
         table.setFont(new Font("SansSerif", Font.PLAIN, 12));
         table.setRowHeight(22);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         table.setAutoCreateRowSorter(true);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         table.setShowHorizontalLines(true);
         table.setShowVerticalLines(false);
         table.setGridColor(new Color(230, 230, 230));
 
-        // Column widths
-        int[] widths = {40, 60, 200, 250, 140, 55, 60};
+        int[] widths = {42, 78, 150, 72, 90, 90, 88, 190, 300};
         for (int i = 0; i < widths.length && i < table.getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
         }
-        table.getColumnModel().getColumn(0).setMaxWidth(50);  // ID
-        table.getColumnModel().getColumn(1).setMaxWidth(80);  // Method
-        table.getColumnModel().getColumn(5).setMaxWidth(70);  // Status
-        table.getColumnModel().getColumn(6).setMaxWidth(80);  // Length
+        table.getColumnModel().getColumn(0).setMaxWidth(50);
+        table.getColumnModel().getColumn(1).setMaxWidth(85);
+        table.getColumnModel().getColumn(3).setMaxWidth(80);
 
-        // Color renderer
-        StatusColorRenderer renderer = new StatusColorRenderer();
+        EvidenceColorRenderer renderer = new EvidenceColorRenderer();
         for (int i = 0; i < table.getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setCellRenderer(renderer);
         }
 
-        // Native Burp editors
         requestViewer = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
         responseViewer = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
+        controlRequestViewer = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
+        controlResponseViewer = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
+
+        candidateTabs = new JTabbedPane();
+        candidateTabs.addTab("Request", requestViewer.uiComponent());
+        candidateTabs.addTab("Response", responseViewer.uiComponent());
+
+        controlTabs = new JTabbedPane();
+        controlTabs.addTab("Request", controlRequestViewer.uiComponent());
+        controlTabs.addTab("Response", controlResponseViewer.uiComponent());
+
+        evidenceViewer = new JTextArea();
+        evidenceViewer.setEditable(false);
+        evidenceViewer.setLineWrap(true);
+        evidenceViewer.setWrapStyleWord(true);
+        evidenceViewer.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        evidenceViewer.setMargin(new Insets(8, 8, 8, 8));
+
+        detailTabs = new JTabbedPane();
+        detailTabs.addTab("Candidate", candidateTabs);
+        detailTabs.addTab("Control", controlTabs);
+        detailTabs.addTab("Evidence", new JScrollPane(evidenceViewer));
 
         table.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
                 int row = table.getSelectedRow();
-                if (row != -1) {
-                    int modelRow = table.convertRowIndexToModel(row);
-                    BypassResult result = tableModel.getResult(modelRow);
-                    requestViewer.setRequest(result.getRequestResponse().request());
-                    responseViewer.setResponse(result.getRequestResponse().response());
-                } else {
-                    requestViewer.setRequest(null);
-                    responseViewer.setResponse(null);
+                if (row == -1) {
+                    clearEvidenceViewers();
+                    return;
                 }
+                int modelRow = table.convertRowIndexToModel(row);
+                showResult(tableModel.getResult(modelRow));
             }
         });
 
-        // Context menu on table
         JPopupMenu popup = new JPopupMenu();
         JMenuItem deleteItem = new JMenuItem("Delete Row");
         JMenuItem clearItem = new JMenuItem("Clear All Results");
         deleteItem.addActionListener(e -> {
             int row = table.getSelectedRow();
-            if (row != -1) tableModel.removeRow(table.convertRowIndexToModel(row));
+            if (row != -1) {
+                tableModel.removeRow(table.convertRowIndexToModel(row));
+                clearEvidenceViewers();
+            }
         });
         clearItem.addActionListener(e -> clearResults());
         popup.add(deleteItem);
@@ -209,39 +236,88 @@ public class BusterUI implements AttackEngine.AttackListener {
         table.setComponentPopupMenu(popup);
 
         JScrollPane tableScroll = new JScrollPane(table);
+        tableScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
         tableScroll.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createLineBorder(new Color(180, 180, 180)),
-                " Results ", TitledBorder.LEFT, TitledBorder.TOP, SECTION_TITLE));
+                " Evidence-ranked results ", TitledBorder.LEFT, TitledBorder.TOP, SECTION_TITLE));
 
-        JTabbedPane reqTabs = new JTabbedPane();
-        reqTabs.addTab("Request", requestViewer.uiComponent());
-        JTabbedPane resTabs = new JTabbedPane();
-        resTabs.addTab("Response", responseViewer.uiComponent());
-
-        JSplitPane editorSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                reqTabs, resTabs);
-        editorSplit.setResizeWeight(0.5);
-
-        JSplitPane mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
-                tableScroll, editorSplit);
-        mainSplit.setResizeWeight(0.4);
-
+        JSplitPane mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tableScroll, detailTabs);
+        mainSplit.setResizeWeight(0.42);
         panel.add(mainSplit, BorderLayout.CENTER);
         return panel;
     }
 
+    private void showResult(BypassResult result) {
+        requestViewer.setRequest(result.getRequestResponse() == null ? null : result.getRequestResponse().request());
+        responseViewer.setResponse(result.getRequestResponse() == null ? null : result.getRequestResponse().response());
+
+        HttpRequestResponse control = result.getControlRequestResponse();
+        controlRequestViewer.setRequest(control == null ? null : control.request());
+        controlResponseViewer.setResponse(control == null ? null : control.response());
+        detailTabs.setTitleAt(1, result.isControlCompared() ? "Control" : "Control (none)");
+        evidenceViewer.setText(buildEvidenceSummary(result));
+        evidenceViewer.setCaretPosition(0);
+    }
+
+    private void clearEvidenceViewers() {
+        if (requestViewer != null) requestViewer.setRequest(null);
+        if (responseViewer != null) responseViewer.setResponse(null);
+        if (controlRequestViewer != null) controlRequestViewer.setRequest(null);
+        if (controlResponseViewer != null) controlResponseViewer.setResponse(null);
+        if (evidenceViewer != null) evidenceViewer.setText("");
+        if (detailTabs != null && detailTabs.getTabCount() > 1) detailTabs.setTitleAt(1, "Control (none)");
+    }
+
+    static String buildEvidenceSummary(BypassResult r) {
+        StringBuilder out = new StringBuilder();
+        out.append("Classification : ").append(classificationLabel(r)).append('\n');
+        out.append("Confidence     : ").append(r.getConfidence()).append(" / 100\n");
+        out.append("HTTP status    : ").append(r.getStatus()).append('\n');
+        out.append("Response length: ").append(r.getLength()).append('\n');
+        out.append("Baseline sim.  : ").append(formatSimilarity(r.getBodySimilarity())).append('\n');
+        out.append("Control        : ").append(r.isControlCompared() ? "compared" : "not required").append('\n');
+        if (r.isControlCompared()) {
+            out.append("Control status : ").append(r.getControlStatus()).append('\n');
+            out.append("Control sim.   : ").append(formatSimilarity(r.getControlSimilarity())).append('\n');
+        }
+        out.append("Repeatability  : ").append(repeatabilityLabel(r)).append('\n');
+        out.append("\nTechnique\n---------\n").append(nullToEmpty(r.getTechnique())).append('\n');
+        out.append("Category: ").append(nullToEmpty(r.getCategory())).append('\n');
+        out.append("\nAnalyzer rationale\n------------------\n").append(nullToEmpty(r.getRationale())).append('\n');
+        out.append("\nRevalidation\n------------\n").append(nullToEmpty(r.getRevalidationRationale())).append('\n');
+        out.append("\nManual validation is still required before treating this as a confirmed authorization bypass.");
+        return out.toString();
+    }
+
+    static String classificationLabel(BypassResult r) {
+        return r.getClassification() == null ? "UNKNOWN" : r.getClassification().name();
+    }
+
+    static String formatSimilarity(double similarity) {
+        if (similarity < 0.0) return "—";
+        double clamped = Math.max(0.0, Math.min(1.0, similarity));
+        return String.format(Locale.ROOT, "%.1f%%", clamped * 100.0);
+    }
+
+    static String repeatabilityLabel(BypassResult r) {
+        if (r.isRevalidationAttempted()) {
+            return r.getRepeatabilityPasses() + "/" + r.getRepeatabilitySamples();
+        }
+        return r.getClassification() == ResponseAnalyzer.ResultType.BYPASS_CANDIDATE ? "manual" : "—";
+    }
+
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
     private JPanel buildControlBar() {
         JPanel bar = new JPanel(new BorderLayout(0, 4));
-
-        // Row 1: Target label
-        targetLabel = new JLabel("No target set — right-click a request and choose \"Bypass 403 Forbidden\"");
+        targetLabel = new JLabel("No target set — right-click a 401/403 request and choose a 403 Buster mode");
         targetLabel.setFont(new Font("SansSerif", Font.BOLD, 12));
         targetLabel.setForeground(Color.GRAY);
         targetLabel.setBorder(BorderFactory.createEmptyBorder(2, 4, 4, 0));
 
-        // Row 2: Buttons
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-
         runBtn = styledButton("Run Attack", new Color(46, 125, 50));
         runBtn.setEnabled(false);
         runBtn.addActionListener(e -> startAttack());
@@ -256,8 +332,7 @@ public class BusterUI implements AttackEngine.AttackListener {
 
         clearBtn = new JButton("Clear Results");
         clearBtn.addActionListener(e -> clearResults());
-
-        exportBtn = new JButton("Export CSV");
+        exportBtn = new JButton("Export Evidence CSV");
         exportBtn.addActionListener(e -> exportCSV());
 
         statusLabel = new JLabel("Ready");
@@ -273,7 +348,6 @@ public class BusterUI implements AttackEngine.AttackListener {
         btnPanel.add(Box.createHorizontalStrut(16));
         btnPanel.add(statusLabel);
 
-        // Row 3: Progress bar
         progressBar = new JProgressBar(0, 100);
         progressBar.setStringPainted(true);
         progressBar.setString("Ready");
@@ -293,20 +367,15 @@ public class BusterUI implements AttackEngine.AttackListener {
         btn.setFont(new Font("SansSerif", Font.BOLD, 11));
         btn.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(bg.darker(), 1),
-                BorderFactory.createEmptyBorder(4, 12, 4, 12)
-        ));
+                BorderFactory.createEmptyBorder(4, 12, 4, 12)));
         btn.setOpaque(true);
         return btn;
     }
 
-    // -------------------------------------------------------------------------
-    //  Tab 2: Configuration
-    // -------------------------------------------------------------------------
     private JComponent buildConfigTab() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
         panel.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 
-        // Left side: Toggles + Settings
         JPanel leftPanel = new JPanel();
         leftPanel.setLayout(new BoxLayout(leftPanel, BoxLayout.Y_AXIS));
         leftPanel.add(buildTogglesPanel());
@@ -314,7 +383,6 @@ public class BusterUI implements AttackEngine.AttackListener {
         leftPanel.add(buildScanSettingsPanel());
         leftPanel.add(Box.createVerticalGlue());
 
-        // Right side: IP List + Path List
         JPanel rightPanel = new JPanel();
         rightPanel.setLayout(new BoxLayout(rightPanel, BoxLayout.Y_AXIS));
         rightPanel.add(buildIPPanel());
@@ -324,15 +392,12 @@ public class BusterUI implements AttackEngine.AttackListener {
         JSplitPane configSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, rightPanel);
         configSplit.setResizeWeight(0.4);
 
-        // Save button at the bottom
         JButton saveBtn = new JButton("Save Configuration");
         saveBtn.setFont(new Font("SansSerif", Font.BOLD, 12));
         saveBtn.addActionListener(e -> {
             saveSettings();
-            JOptionPane.showMessageDialog(panel, "Configuration saved.",
-                    "403 Buster", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(panel, "Configuration saved.", "403 Buster", JOptionPane.INFORMATION_MESSAGE);
         });
-
         JPanel bottomBar = new JPanel(new FlowLayout(FlowLayout.CENTER));
         bottomBar.add(saveBtn);
 
@@ -357,24 +422,25 @@ public class BusterUI implements AttackEngine.AttackListener {
         chkHopByHop = new JCheckBox("Hop-By-Hop Header Abuse");
         chkPathObf = new JCheckBox("Path Obfuscation");
         chkMethods = new JCheckBox("Method Tampering & Overrides");
-        chkProtocolDowngrade = new JCheckBox("Protocol Downgrade");
+        chkProtocolDowngrade = new JCheckBox("Protocol Representation Variants (Experimental)");
+        chkProtocolDowngrade.setToolTipText(
+                "Experimental request-line representation only; Burp may normalize the actual network protocol on send."
+        );
         chkSuffixes = new JCheckBox("Suffix Attacks (.json, ?, ;)");
         chkCaseSwitch = new JCheckBox("Case Switching");
         chkUnicode = new JCheckBox("Unicode Normalization");
         chkBackslash = new JCheckBox("Backslash Bypass (IIS/Tomcat)");
         chkHeaderInjection = new JCheckBox("Header Injection (Proto/Port/Host)");
-
         chkHide404 = new JCheckBox("Hide 404 Responses");
         chkHide403 = new JCheckBox("Hide 403 Responses");
 
-        // Layout: 2 columns
         JCheckBox[][] rows = {
                 {chkIpSpoofing, chkPathObf},
                 {chkPathSwapping, chkMethods},
                 {chkHopByHop, chkProtocolDowngrade},
                 {chkSuffixes, chkCaseSwitch},
                 {chkUnicode, chkBackslash},
-                {chkHeaderInjection, null},
+                {chkHeaderInjection, null}
         };
 
         for (int row = 0; row < rows.length; row++) {
@@ -387,19 +453,16 @@ public class BusterUI implements AttackEngine.AttackListener {
             }
         }
 
-        // Separator before filter controls
         g.gridy = rows.length;
         g.gridx = 0;
         g.gridwidth = 2;
         panel.add(new JSeparator(), g);
         g.gridwidth = 1;
-
         g.gridy = rows.length + 1;
         g.gridx = 0;
         panel.add(chkHide404, g);
         g.gridx = 1;
         panel.add(chkHide403, g);
-
         return panel;
     }
 
@@ -408,7 +471,6 @@ public class BusterUI implements AttackEngine.AttackListener {
         panel.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createLineBorder(new Color(180, 180, 180)),
                 " Scan Settings ", TitledBorder.LEFT, TitledBorder.TOP, SECTION_TITLE));
-
         GridBagConstraints g = new GridBagConstraints();
         g.anchor = GridBagConstraints.WEST;
         g.insets = new Insets(4, 8, 4, 8);
@@ -419,21 +481,15 @@ public class BusterUI implements AttackEngine.AttackListener {
         delaySlider.setMinorTickSpacing(50);
         delaySlider.setPaintTicks(true);
         delaySlider.setPaintLabels(true);
-        delaySlider.addChangeListener(e ->
-                delayLabel.setText("Request Delay (ms): " + delaySlider.getValue()));
+        delaySlider.addChangeListener(e -> delayLabel.setText("Request Delay (ms): " + delaySlider.getValue()));
 
         threadSpinner = new JSpinner(new SpinnerNumberModel(DEFAULT_THREADS, 1, 50, 1));
         JLabel threadLabel = new JLabel("Concurrency (Threads):");
 
         g.gridx = 0; g.gridy = 0; panel.add(delayLabel, g);
-        g.gridx = 1; g.gridy = 0; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1;
-        panel.add(delaySlider, g);
-
-        g.gridx = 0; g.gridy = 1; g.fill = GridBagConstraints.NONE; g.weightx = 0;
-        panel.add(threadLabel, g);
-        g.gridx = 1; g.gridy = 1;
-        panel.add(threadSpinner, g);
-
+        g.gridx = 1; g.gridy = 0; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1; panel.add(delaySlider, g);
+        g.gridx = 0; g.gridy = 1; g.fill = GridBagConstraints.NONE; g.weightx = 0; panel.add(threadLabel, g);
+        g.gridx = 1; g.gridy = 1; panel.add(threadSpinner, g);
         return panel;
     }
 
@@ -461,38 +517,29 @@ public class BusterUI implements AttackEngine.AttackListener {
         return panel;
     }
 
-    // =========================================================================
-    //  Actions
-    // =========================================================================
-
     private void startAttack() {
         if (targetRequest == null) {
             JOptionPane.showMessageDialog(mainTabs,
-                    "No target set.\nRight-click a request in Proxy HTTP History " +
-                    "and choose \"Bypass 403 Forbidden\".",
+                    "No target set.\nRight-click a 401/403 request in Proxy HTTP History and choose a 403 Buster mode.",
                     "No Target", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
         saveSettings();
         AttackConfig config = buildConfig();
-
         List<String> errors = config.validate();
         if (!errors.isEmpty()) {
-            JOptionPane.showMessageDialog(mainTabs,
-                    String.join("\n", errors),
+            JOptionPane.showMessageDialog(mainTabs, String.join("\n", errors),
                     "Validation Error", JOptionPane.WARNING_MESSAGE);
             return;
         }
-
         setAttackUIState(true);
         engine.startAttack(targetRequest, config);
     }
 
     private void togglePause() {
         engine.togglePause();
-        SwingUtilities.invokeLater(() ->
-                pauseBtn.setText(engine.isPaused() ? "Resume" : "Pause"));
+        SwingUtilities.invokeLater(() -> pauseBtn.setText(engine.isPaused() ? "Resume" : "Pause"));
     }
 
     private void stopAttack() {
@@ -503,8 +550,7 @@ public class BusterUI implements AttackEngine.AttackListener {
 
     private void clearResults() {
         tableModel.clear();
-        requestViewer.setRequest(null);
-        responseViewer.setResponse(null);
+        clearEvidenceViewers();
         progressBar.setValue(0);
         progressBar.setString("Ready");
         statusLabel.setText("Ready");
@@ -512,50 +558,51 @@ public class BusterUI implements AttackEngine.AttackListener {
 
     private void exportCSV() {
         if (tableModel.getRowCount() == 0) {
-            JOptionPane.showMessageDialog(mainTabs, "No results to export.",
-                    "Export", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(mainTabs, "No results to export.", "Export", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
         JFileChooser chooser = new JFileChooser();
-        chooser.setSelectedFile(new File("403_buster_results.csv"));
-        if (chooser.showSaveDialog(mainTabs) == JFileChooser.APPROVE_OPTION) {
-            try (PrintWriter pw = new PrintWriter(new OutputStreamWriter(
-                    new FileOutputStream(chooser.getSelectedFile()), StandardCharsets.UTF_8))) {
-                // Header
-                pw.println("ID,Method,URL,Technique,Category,Status,Length");
-                // Rows
-                for (int i = 0; i < tableModel.getRowCount(); i++) {
-                    BypassResult r = tableModel.getResult(i);
-                    pw.println(csvEscape(String.valueOf(r.getId())) + "," +
-                            csvEscape(r.getMethod()) + "," +
-                            csvEscape(r.getUrl()) + "," +
-                            csvEscape(r.getTechnique()) + "," +
-                            csvEscape(r.getCategory()) + "," +
-                            r.getStatus() + "," +
-                            r.getLength());
-                }
-                JOptionPane.showMessageDialog(mainTabs,
-                        "Exported " + tableModel.getRowCount() + " results.",
-                        "Export Complete", JOptionPane.INFORMATION_MESSAGE);
-            } catch (IOException ex) {
-                JOptionPane.showMessageDialog(mainTabs,
-                        "Export failed: " + ex.getMessage(),
-                        "Error", JOptionPane.ERROR_MESSAGE);
+        chooser.setSelectedFile(new File("403_buster_evidence.csv"));
+        if (chooser.showSaveDialog(mainTabs) != JFileChooser.APPROVE_OPTION) return;
+
+        try (PrintWriter pw = new PrintWriter(new OutputStreamWriter(
+                new FileOutputStream(chooser.getSelectedFile()), StandardCharsets.UTF_8))) {
+            pw.println("ID,Confidence,Classification,Method,URL,Technique,Category,Status,Length,BaselineSimilarity,ControlCompared,ControlStatus,ControlSimilarity,Repeatability,Rationale,RevalidationRationale");
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                BypassResult r = tableModel.getResult(i);
+                pw.println(csvEscape(String.valueOf(r.getId())) + "," +
+                        r.getConfidence() + "," +
+                        csvEscape(classificationLabel(r)) + "," +
+                        csvEscape(r.getMethod()) + "," +
+                        csvEscape(r.getUrl()) + "," +
+                        csvEscape(r.getTechnique()) + "," +
+                        csvEscape(r.getCategory()) + "," +
+                        r.getStatus() + "," +
+                        r.getLength() + "," +
+                        csvEscape(formatSimilarity(r.getBodySimilarity())) + "," +
+                        r.isControlCompared() + "," +
+                        (r.isControlCompared() ? r.getControlStatus() : "") + "," +
+                        csvEscape(r.isControlCompared() ? formatSimilarity(r.getControlSimilarity()) : "") + "," +
+                        csvEscape(repeatabilityLabel(r)) + "," +
+                        csvEscape(r.getRationale()) + "," +
+                        csvEscape(r.getRevalidationRationale()));
             }
+            JOptionPane.showMessageDialog(mainTabs,
+                    "Exported " + tableModel.getRowCount() + " evidence-rich results.",
+                    "Export Complete", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(mainTabs, "Export failed: " + ex.getMessage(),
+                    "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
     private String csvEscape(String s) {
         if (s == null) return "";
-        if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+        if (s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r")) {
             return "\"" + s.replace("\"", "\"\"") + "\"";
         }
         return s;
     }
-
-    // =========================================================================
-    //  AttackEngine.AttackListener Implementation
-    // =========================================================================
 
     @Override
     public void onResult(BypassResult result) {
@@ -569,7 +616,7 @@ public class BusterUI implements AttackEngine.AttackListener {
             progressBar.setValue(completed);
             int pct = total > 0 ? (int) ((completed * 100.0) / total) : 0;
             progressBar.setString(completed + " / " + total + " (" + pct + "%)");
-            statusLabel.setText("Running... " + tableModel.getRowCount() + " findings");
+            statusLabel.setText("Running... " + tableModel.getRowCount() + " candidates/anomalies");
         });
     }
 
@@ -579,7 +626,7 @@ public class BusterUI implements AttackEngine.AttackListener {
             progressBar.setMaximum(totalPayloads);
             progressBar.setValue(0);
             progressBar.setString("0 / " + totalPayloads + " (0%)");
-            statusLabel.setText("Attacking with " + totalPayloads + " payloads...");
+            statusLabel.setText("Analyzing " + totalPayloads + " payloads...");
         });
     }
 
@@ -587,8 +634,8 @@ public class BusterUI implements AttackEngine.AttackListener {
     public void onAttackComplete() {
         SwingUtilities.invokeLater(() -> {
             setAttackUIState(false);
-            progressBar.setString("Complete — " + tableModel.getRowCount() + " findings");
-            statusLabel.setText("Complete — " + tableModel.getRowCount() + " findings");
+            progressBar.setString("Complete — " + tableModel.getRowCount() + " candidates/anomalies");
+            statusLabel.setText("Complete — " + tableModel.getRowCount() + " candidates/anomalies");
         });
     }
 
@@ -597,30 +644,14 @@ public class BusterUI implements AttackEngine.AttackListener {
         api.logging().logToError("[403 Buster] " + technique + ": " + errorMessage);
     }
 
-    // =========================================================================
-    //  Internal Helpers
-    // =========================================================================
-
     private AttackConfig buildConfig() {
         return new AttackConfig(
-                chkIpSpoofing.isSelected(),
-                chkPathSwapping.isSelected(),
-                chkHopByHop.isSelected(),
-                chkPathObf.isSelected(),
-                chkMethods.isSelected(),
-                chkProtocolDowngrade.isSelected(),
-                chkSuffixes.isSelected(),
-                chkHide404.isSelected(),
-                chkHide403.isSelected(),
-                chkCaseSwitch.isSelected(),
-                chkUnicode.isSelected(),
-                chkBackslash.isSelected(),
-                chkHeaderInjection.isSelected(),
-                delaySlider.getValue(),
-                (Integer) threadSpinner.getValue(),
-                ipConfigArea.getText(),
-                pathConfigArea.getText()
-        );
+                chkIpSpoofing.isSelected(), chkPathSwapping.isSelected(), chkHopByHop.isSelected(),
+                chkPathObf.isSelected(), chkMethods.isSelected(), chkProtocolDowngrade.isSelected(),
+                chkSuffixes.isSelected(), chkHide404.isSelected(), chkHide403.isSelected(),
+                chkCaseSwitch.isSelected(), chkUnicode.isSelected(), chkBackslash.isSelected(),
+                chkHeaderInjection.isSelected(), delaySlider.getValue(), (Integer) threadSpinner.getValue(),
+                ipConfigArea.getText(), pathConfigArea.getText());
     }
 
     private void setAttackUIState(boolean active) {
@@ -640,12 +671,12 @@ public class BusterUI implements AttackEngine.AttackListener {
 
         try {
             String d = preferences.getString(KEY_DELAY);
-            if (d != null) { delaySlider.setValue(Integer.parseInt(d)); }
+            if (d != null) delaySlider.setValue(Integer.parseInt(d));
         } catch (NumberFormatException ignored) {}
 
         try {
             String t = preferences.getString(KEY_THREADS);
-            if (t != null) { threadSpinner.setValue(Integer.parseInt(t)); }
+            if (t != null) threadSpinner.setValue(Integer.parseInt(t));
         } catch (NumberFormatException ignored) {}
 
         loadToggle(chkIpSpoofing, "ipSpoofing", true);
@@ -653,7 +684,7 @@ public class BusterUI implements AttackEngine.AttackListener {
         loadToggle(chkHopByHop, "hopByHop", true);
         loadToggle(chkPathObf, "pathObf", true);
         loadToggle(chkMethods, "methods", true);
-        loadToggle(chkProtocolDowngrade, "protocol", true);
+        loadToggle(chkProtocolDowngrade, "protocol", false);
         loadToggle(chkSuffixes, "suffixes", true);
         loadToggle(chkHide404, "hide404", false);
         loadToggle(chkHide403, "hide403", false);
@@ -661,7 +692,6 @@ public class BusterUI implements AttackEngine.AttackListener {
         loadToggle(chkUnicode, "unicode", true);
         loadToggle(chkBackslash, "backslash", true);
         loadToggle(chkHeaderInjection, "headerInj", true);
-
         delayLabel.setText("Request Delay (ms): " + delaySlider.getValue());
     }
 
@@ -670,13 +700,12 @@ public class BusterUI implements AttackEngine.AttackListener {
         check.setSelected(val != null ? val : defaultVal);
     }
 
-    // =========================================================================
-    //  Table Model
-    // =========================================================================
-
     static class ResultTableModel extends AbstractTableModel {
         private final CopyOnWriteArrayList<BypassResult> results = new CopyOnWriteArrayList<>();
-        private final String[] columns = {"#", "Method", "URL", "Technique", "Category", "Status", "Length"};
+        private final String[] columns = {
+                "#", "Confidence", "Classification", "Status", "Baseline Sim", "Control Sim",
+                "Repeat", "Technique", "URL"
+        };
 
         void addResult(BypassResult result) {
             results.add(result);
@@ -703,60 +732,62 @@ public class BusterUI implements AttackEngine.AttackListener {
 
         @Override
         public Class<?> getColumnClass(int col) {
-            if (col == 0 || col == 5 || col == 6) return Integer.class;
+            if (col == 0 || col == 1 || col == 3) return Integer.class;
             return String.class;
         }
 
         @Override
         public Object getValueAt(int row, int col) {
             BypassResult r = results.get(row);
-            switch (col) {
-                case 0: return r.getId();
-                case 1: return r.getMethod();
-                case 2: return r.getUrl();
-                case 3: return r.getTechnique();
-                case 4: return r.getCategory();
-                case 5: return r.getStatus();
-                case 6: return r.getLength();
-                default: return "";
-            }
+            return switch (col) {
+                case 0 -> r.getId();
+                case 1 -> r.getConfidence();
+                case 2 -> classificationLabel(r);
+                case 3 -> r.getStatus();
+                case 4 -> formatSimilarity(r.getBodySimilarity());
+                case 5 -> r.isControlCompared() ? formatSimilarity(r.getControlSimilarity()) : "—";
+                case 6 -> repeatabilityLabel(r);
+                case 7 -> r.getTechnique();
+                case 8 -> r.getUrl();
+                default -> "";
+            };
         }
     }
 
-    // =========================================================================
-    //  Color Renderer
-    // =========================================================================
-
-    class StatusColorRenderer extends DefaultTableCellRenderer {
+    class EvidenceColorRenderer extends DefaultTableCellRenderer {
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value,
                 boolean isSelected, boolean hasFocus, int row, int column) {
-            Component c = super.getTableCellRendererComponent(table, value,
-                    isSelected, hasFocus, row, column);
+            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+            c.setFont(c.getFont().deriveFont(Font.PLAIN));
+            if (isSelected) return c;
 
-            if (!isSelected) {
-                int modelRow = table.convertRowIndexToModel(row);
-                BypassResult r = tableModel.getResult(modelRow);
-                int status = r.getStatus();
+            int modelRow = table.convertRowIndexToModel(row);
+            BypassResult r = tableModel.getResult(modelRow);
+            ResponseAnalyzer.ResultType type = r.getClassification();
 
-                if (status >= 200 && status < 300) {
-                    c.setBackground(BYPASS_GREEN);
-                    if (r.isInteresting()) {
-                        c.setForeground(new Color(27, 94, 32)); // dark green
-                        c.setFont(c.getFont().deriveFont(Font.BOLD));
-                    } else {
-                        c.setForeground(Color.BLACK);
-                    }
-                } else if (status >= 300 && status < 400) {
-                    c.setBackground(REDIRECT_ORANGE);
-                    c.setForeground(Color.BLACK);
-                } else if (status >= 500) {
-                    c.setBackground(ERROR_RED);
-                    c.setForeground(Color.BLACK);
-                } else {
-                    c.setBackground(Color.WHITE);
-                    c.setForeground(Color.BLACK);
-                }
+            if (type == ResponseAnalyzer.ResultType.BYPASS_CANDIDATE) {
+                c.setBackground(BYPASS_GREEN);
+                c.setForeground(new Color(27, 94, 32));
+                c.setFont(c.getFont().deriveFont(Font.BOLD));
+            } else if (type == ResponseAnalyzer.ResultType.REDIRECT) {
+                c.setBackground(REDIRECT_ORANGE);
+                c.setForeground(Color.BLACK);
+            } else if (type == ResponseAnalyzer.ResultType.ERROR) {
+                c.setBackground(ERROR_RED);
+                c.setForeground(Color.BLACK);
+            } else if (type == ResponseAnalyzer.ResultType.METHOD_BEHAVIOR
+                    || type == ResponseAnalyzer.ResultType.CONTROL_MATCH) {
+                c.setBackground(MUTED_GRAY);
+                c.setForeground(Color.DARK_GRAY);
+            } else if (type == ResponseAnalyzer.ResultType.STATUS_ANOMALY
+                    || type == ResponseAnalyzer.ResultType.BODY_ANOMALY
+                    || type == ResponseAnalyzer.ResultType.LENGTH_ANOMALY) {
+                c.setBackground(ANOMALY_YELLOW);
+                c.setForeground(Color.BLACK);
+            } else {
+                c.setBackground(Color.WHITE);
+                c.setForeground(Color.BLACK);
             }
             return c;
         }

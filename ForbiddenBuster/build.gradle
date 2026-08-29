@@ -3,19 +3,35 @@ plugins {
 }
 
 group = 'com.bughunter'
-version = '7.0'
+version = '8.0'
 
 repositories {
     mavenCentral()
 }
 
 dependencies {
-    compileOnly 'net.portswigger.burp.extensions:montoya-api:2023.12.1'
+    compileOnly 'net.portswigger.burp.extensions:montoya-api:2026.7'
+
+    // Production keeps Montoya compile-only because Burp supplies it at runtime.
+    // UI/evidence tests instantiate classes whose signatures reference Montoya types,
+    // so the API is also needed on the test compile/runtime classpath.
+    testImplementation 'net.portswigger.burp.extensions:montoya-api:2026.7'
+    testImplementation platform('org.junit:junit-bom:6.1.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed'
+        exceptionFormat 'full'
     }
 }
 
