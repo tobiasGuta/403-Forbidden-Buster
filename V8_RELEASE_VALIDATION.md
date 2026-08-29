@@ -11,8 +11,8 @@ This file records the manual release validation performed for the v8 accuracy/sa
 | Originally tested JAR SHA-256 | `6444de5fdfc7cc0c0e336ff4305680b01a9a618cbfb0ab23f367900813de1ccb` |
 | Original provenance artifact | `ForbiddenBuster-v8-800b359234888c6019c538961fb25bd4289b5d10` |
 | Original artifact ZIP SHA-256 | `a48ac1bbd4f10ea893b07ce48f6d79f1a3acf7fde290577a1aaa2317bbd25fe9` |
-| Post-review tested head | `dfdf91ea0b92658b979bd1504df9f0c779abae0a` |
-| Post-review tested JAR SHA-256 | `a2dd99e7910d598a1f42e536de14dee2563ff1f20535906188eb55f87deb62be` |
+| Post-review runtime-tested head | `dfdf91ea0b92658b979bd1504df9f0c779abae0a` |
+| Post-review runtime-tested JAR SHA-256 | `a2dd99e7910d598a1f42e536de14dee2563ff1f20535906188eb55f87deb62be` |
 | Post-review artifact | `ForbiddenBuster-v8-dfdf91ea0b92658b979bd1504df9f0c779abae0a` |
 | Post-review artifact ZIP SHA-256 | `ac583a045cbd3caae06e1611890b2274ef55eaf34edd398f063b31cda68e1262` |
 | Burp | Community Edition `v2026.7.3` |
@@ -158,4 +158,4 @@ These remain intentionally deferred:
 
 All identified release-blocking safety checks are now cleared, including the post-review Safe Mode per-run isolation issue. The full original manual suite passed, the narrow post-review fix passed automated regression coverage, and the exact post-review artifact passed the targeted runtime retest.
 
-The commit that records this final result is documentation-only. After CI is green on that documentation head, PR #1 is ready for the explicit merge/release decision.
+The commits that record the final result are documentation-only. After CI is green on the final documentation head, PR #1 is ready for the explicit merge/release decision.
