@@ -124,7 +124,7 @@ public class AttackConfig {
                 || isBackslashBypass() || isHeaderInjection();
         if (!anyEnabled)
             errors.add(isSafeMode()
-                    ? "No Safe Mode techniques are enabled. Method Tampering and the mixed Header Injection category require Active Methods."
+                    ? "No Safe Mode techniques are enabled. Method Tampering requires Active Methods."
                     : "At least one attack technique must be enabled.");
         return errors;
     }
@@ -147,8 +147,8 @@ public class AttackConfig {
     public boolean isHopByHop() { return hopByHop && targetAllowedByMode(); }
     public boolean isPathObfuscation() { return pathObfuscation && targetAllowedByMode(); }
 
-    // These categories currently contain non-GET/HEAD/OPTIONS requests. Keep them
-    // completely out of Safe Mode until the generator is split into safe/active subfamilies.
+    // Method Tampering intentionally stays completely out of Safe Mode. It mixes
+    // safe and non-allowlisted verbs plus method-override payloads.
     public boolean isMethodTampering() {
         return methodTampering && activeMethodsEnabled && targetAllowedByMode();
     }
@@ -161,8 +161,14 @@ public class AttackConfig {
     public boolean isUnicodeNormalization() { return unicodeNormalization && targetAllowedByMode(); }
     public boolean isBackslashBypass() { return backslashBypass && targetAllowedByMode(); }
 
+    /**
+     * Header Injection participates in Safe Mode again. The generator may
+     * materialize both header-only and POST-based variants, but the execution
+     * planner rejects every non-allowlisted request before queueing unless
+     * Active Methods was explicitly enabled for the current target.
+     */
     public boolean isHeaderInjection() {
-        return headerInjection && activeMethodsEnabled && targetAllowedByMode();
+        return headerInjection && targetAllowedByMode();
     }
 
     public boolean isActiveMethodsEnabled() { return activeMethodsEnabled; }
