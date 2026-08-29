@@ -2,7 +2,9 @@ package com.bughunter;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.http.message.requests.HttpRequest;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -10,7 +12,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Manages attack execution with thread pool, pause/resume/stop controls,
- * global rate limiting, calibrated v8 response analysis, and progress reporting.
+ * global rate limiting, calibrated v8 response analysis, paired controls,
+ * and progress reporting.
  */
 public class AttackEngine {
 
@@ -33,7 +36,7 @@ public class AttackEngine {
     private ExecutorService executor;
     private Thread coordinatorThread;
 
-    // Global rate limiter — shared across calibration and attack workers.
+    // Global rate limiter — shared across calibration, controls, and attack workers.
     private volatile long lastRequestTimeMs = 0;
     private final Object rateLock = new Object();
 
@@ -111,9 +114,41 @@ public class AttackEngine {
             return;
         }
 
-        // Generate all payloads only after the baseline is known to be stable.
-        List<PayloadGenerator.Payload> payloads = PayloadGenerator.generate(baseRequestResponse, config);
+        // Generate payloads only after the baseline is known to be stable. Then apply
+        // semantic-target and control-safety gates before anything is queued.
+        List<PayloadGenerator.Payload> generatedPayloads = PayloadGenerator.generate(baseRequestResponse, config);
+        List<PayloadGenerator.Payload> payloads = new ArrayList<>();
+        int semanticSkips = 0;
+        int unsafeControlSkips = 0;
+
+        for (PayloadGenerator.Payload payload : generatedPayloads) {
+            PairedControlPlanner.Plan plan = PairedControlPlanner.plan(baseRequestResponse, payload);
+            if (plan.shouldSkip()) {
+                semanticSkips++;
+                continue;
+            }
+            if (plan.requiresControl() && !isSafeAutomaticControlMethod(plan.controlRequest())) {
+                unsafeControlSkips++;
+                continue;
+            }
+            payloads.add(payload);
+        }
+
+        if (semanticSkips > 0) {
+            api.logging().logToOutput("[403 Buster] Skipped " + semanticSkips
+                    + " path-swap payload(s) that changed the protected semantic target.");
+        }
+        if (unsafeControlSkips > 0) {
+            api.logging().logToOutput("[403 Buster] Skipped " + unsafeControlSkips
+                    + " control-required payload(s) because the neutral control would replay a state-changing method.");
+        }
+
         int total = payloads.size();
+        if (total == 0) {
+            api.logging().logToOutput("[403 Buster] No payloads remained after v8 safety and accuracy gates.");
+            listener.onAttackStarted(0);
+            return;
+        }
 
         api.logging().logToOutput("[403 Buster] Starting attack with " + total + " payloads | " +
                 config.getThreadCount() + " threads | " + config.getDelayMs() + "ms delay | " +
@@ -121,7 +156,6 @@ public class AttackEngine {
 
         listener.onAttackStarted(total);
 
-        // Create thread pool
         executor = Executors.newFixedThreadPool(config.getThreadCount(), r -> {
             Thread t = new Thread(r);
             t.setDaemon(true);
@@ -138,25 +172,45 @@ public class AttackEngine {
 
             executor.submit(() -> {
                 try {
-                    if (!waitUntilRunnable()) return;
+                    PairedControlPlanner.Plan plan = PairedControlPlanner.plan(baseRequestResponse, payload);
+                    if (plan.shouldSkip()) return;
 
-                    // Global rate limiting. If Stop interrupts the wait, do not send afterward.
-                    if (!enforceRateLimit(config.getDelayMs())) return;
-                    if (!waitUntilRunnable()) return;
+                    HttpRequestResponse controlResponse = null;
+                    if (plan.requiresControl()) {
+                        controlResponse = sendRateLimited(plan.controlRequest(), config.getDelayMs());
+                        if (controlResponse == null) return;
+                    }
 
-                    HttpRequestResponse response = api.http().sendRequest(payload.request);
+                    HttpRequestResponse response = sendRateLimited(payload.request, config.getDelayMs());
+                    if (response == null) return;
+
                     short statusCode = response.response().statusCode();
                     int length = response.response().body().length();
                     String body = response.response().bodyToString();
 
-                    ResponseAnalyzer.Analysis analysis = analyzer.analyze(
-                            payload.request.method(),
-                            statusCode,
-                            length,
-                            body,
-                            config.isHide404(),
-                            config.isHide403()
-                    );
+                    ResponseAnalyzer.Analysis analysis;
+                    if (controlResponse != null) {
+                        analysis = analyzer.analyzeWithControl(
+                                payload.request.method(),
+                                statusCode,
+                                length,
+                                body,
+                                controlResponse.response().statusCode(),
+                                controlResponse.response().body().length(),
+                                controlResponse.response().bodyToString(),
+                                config.isHide404(),
+                                config.isHide403()
+                        );
+                    } else {
+                        analysis = analyzer.analyze(
+                                payload.request.method(),
+                                statusCode,
+                                length,
+                                body,
+                                config.isHide404(),
+                                config.isHide403()
+                        );
+                    }
 
                     if (analysis.shouldLog()) {
                         BypassResult result = new BypassResult(
@@ -171,7 +225,11 @@ public class AttackEngine {
                                 analysis.type(),
                                 analysis.confidence(),
                                 analysis.bodySimilarity(),
-                                analysis.rationale()
+                                analysis.rationale(),
+                                controlResponse,
+                                analysis.controlCompared(),
+                                analysis.controlStatus(),
+                                analysis.controlSimilarity()
                         );
                         listener.onResult(result);
                     }
@@ -187,7 +245,6 @@ public class AttackEngine {
             });
         }
 
-        // Wait for all tasks to finish
         executor.shutdown();
         try {
             while (!executor.isTerminated()) {
@@ -221,12 +278,10 @@ public class AttackEngine {
                 SAFE_GET_BASELINE_REPLAYS + " live replay(s)...");
 
         for (int i = 0; i < SAFE_GET_BASELINE_REPLAYS; i++) {
-            if (!waitUntilRunnable()) return false;
-            if (!enforceRateLimit(config.getDelayMs())) return false;
-            if (!waitUntilRunnable()) return false;
-
             try {
-                HttpRequestResponse replay = api.http().sendRequest(baseRequestResponse.request());
+                HttpRequestResponse replay = sendRateLimited(baseRequestResponse.request(), config.getDelayMs());
+                if (replay == null) return false;
+
                 short status = replay.response().statusCode();
                 int length = replay.response().body().length();
                 String body = replay.response().bodyToString();
@@ -249,6 +304,22 @@ public class AttackEngine {
         api.logging().logToOutput("[403 Buster] Baseline calibrated: " +
                 analyzer.getBaselineSampleCount() + " stable sample(s).");
         return true;
+    }
+
+    /**
+     * Sends one request only after pause/stop and global-rate-limit checks.
+     * Returns null when the run is stopped or interrupted before transmission.
+     */
+    private HttpRequestResponse sendRateLimited(HttpRequest request, int delayMs) {
+        if (!waitUntilRunnable()) return null;
+        if (!enforceRateLimit(delayMs)) return null;
+        if (!waitUntilRunnable()) return null;
+        return api.http().sendRequest(request);
+    }
+
+    private static boolean isSafeAutomaticControlMethod(HttpRequest request) {
+        String method = request.method();
+        return "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
     }
 
     /**
