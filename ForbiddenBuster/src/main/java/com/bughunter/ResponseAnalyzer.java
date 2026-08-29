@@ -459,6 +459,10 @@ public class ResponseAnalyzer {
 
         try {
             URI uri = new URI(trimmed).normalize();
+            if (uri.isOpaque()) {
+                return stripFragment(trimmed);
+            }
+
             String scheme = uri.getScheme() == null ? null : uri.getScheme().toLowerCase(Locale.ROOT);
             String host = uri.getHost() == null ? null : uri.getHost().toLowerCase(Locale.ROOT);
             int port = uri.getPort();
@@ -467,25 +471,41 @@ public class ResponseAnalyzer {
             }
 
             String path = uri.getRawPath();
-            if ((scheme != null || host != null) && (path == null || path.isEmpty())) path = "/";
+            if ((scheme != null || uri.getRawAuthority() != null) && (path == null || path.isEmpty())) {
+                path = "/";
+            }
 
-            URI normalized = new URI(
-                    scheme,
-                    uri.getRawUserInfo(),
-                    host,
-                    port,
-                    path,
-                    uri.getRawQuery(),
-                    null
-            );
+            StringBuilder normalized = new StringBuilder();
+            if (scheme != null) normalized.append(scheme).append(':');
+
+            if (uri.getRawAuthority() != null) {
+                normalized.append("//");
+                if (host != null) {
+                    if (uri.getRawUserInfo() != null && !uri.getRawUserInfo().isEmpty()) {
+                        normalized.append(uri.getRawUserInfo()).append('@');
+                    }
+                    normalized.append(host);
+                    if (port >= 0) normalized.append(':').append(port);
+                } else {
+                    normalized.append(uri.getRawAuthority());
+                }
+            }
+
+            if (path != null) normalized.append(path);
+            if (uri.getRawQuery() != null) normalized.append('?').append(uri.getRawQuery());
+
             String value = normalized.toString();
             if (!value.isBlank()) return value;
         } catch (URISyntaxException ignored) {
             // Fall back to a conservative string normalization below.
         }
 
-        int fragment = trimmed.indexOf('#');
-        return (fragment >= 0 ? trimmed.substring(0, fragment) : trimmed).trim();
+        return stripFragment(trimmed);
+    }
+
+    private static String stripFragment(String value) {
+        int fragment = value.indexOf('#');
+        return (fragment >= 0 ? value.substring(0, fragment) : value).trim();
     }
 
     static boolean locationsEquivalent(String left, String right) {
