@@ -80,7 +80,7 @@ final class CandidateRevalidation {
                 : "revalidation ended before all planned replays completed";
 
         return new Summary(
-                ResponseAnalyzer.ResultType.UNSTABLE_CANDIDATE,
+                ResponseAnalyzer.ResultType.STATUS_ANOMALY,
                 confidence,
                 true,
                 consistentPasses,
