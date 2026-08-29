@@ -16,6 +16,7 @@ Version 8 is accuracy- and safety-focused. A status change alone is not treated 
 ## Key Features
 * **150+ Bypass Techniques:** Automated fuzzing with header poisoning, path obfuscation, method tampering, protocol variants, Unicode normalization, backslash tricks, and more.
 * **Safe Mode by Default:** Automatic transmission is limited to GET/HEAD/OPTIONS technique families. Non-allowlisted methods are gated behind an explicit per-target confirmation and are never persisted as the default.
+* **Safe Header Injection Coverage:** Forwarding, Host, Accept, and related header-only mutations remain available in Safe Mode, while POST Content-Type variants are filtered before queueing unless Active Methods is explicitly enabled.
 * **Calibrated Baselines:** Safe GET targets are replayed before fuzzing to learn normal response variance and reject stale authorization baselines.
 * **Paired Differential Controls:** Target-preserving `X-Original-URL` and `X-Rewrite-URL` path swaps are compared with the same visible request minus the routing mutation so a normal root-page `200` is not mistaken for a bypass.
 * **Semantic-Target Guard:** Dictionary path swaps that point at a different resource are skipped instead of being scored as target bypasses.
@@ -41,10 +42,10 @@ The extension follows a modular architecture with clean separation of concerns:
 | `AttackEngine.java` | Baseline calibration, paired-control execution, safe candidate revalidation, thread management, pause/resume/stop, global rate limiting |
 | `AttackConfig.java` | Immutable configuration plus effective Safe Mode technique gates |
 | `ActiveMethodsRegistry.java` | Stores the current target's ephemeral Safe/Active execution choice; never persisted |
-| `RequestSafetyPolicy.java` | Central GET/HEAD/OPTIONS automatic-method allowlist |
+| `RequestSafetyPolicy.java` | Central GET/HEAD/OPTIONS method allowlist and execution-mode decision |
 | `BypassResult.java` | Stores candidate evidence, classification, confidence, paired-control evidence, and repeatability metadata |
 | `PayloadGenerator.java` | Generates bypass payloads from the effective technique configuration |
-| `PairedControlPlanner.java` | Enforces semantic-target invariants and creates neutral paired controls for supported mutations |
+| `PairedControlPlanner.java` | Final pre-queue Safe Mode gate plus semantic-target and neutral-control planning |
 | `CandidateRevalidation.java` | Scores safe replay consistency and adjusts candidate classification/confidence based on repeatability |
 | `ResponseAnalyzer.java` | Baseline/control differential analysis and false-positive reduction |
 
@@ -59,14 +60,16 @@ Use the normal context-menu action:
 
 Safe Mode permits automatic technique families only when the selected target method is `GET`, `HEAD`, or `OPTIONS`. If the captured target itself is another method, configuration validation refuses the scan rather than silently replaying it.
 
-The current Method Tampering category and the current Header Injection category are completely gated in Safe Mode because those generator families contain non-allowlisted requests. Other header-, path-, normalization-, protocol-, suffix-, and routing-oriented families remain available when they preserve an allowlisted target method.
+Method Tampering remains fully Active-Methods-only because it intentionally creates alternate verbs and method-override payloads.
+
+Header Injection is split at the execution boundary. Header-only mutations that preserve an allowlisted method remain available, including forwarding scheme/port headers, Host variants, Accept variants, and `Upgrade-Insecure-Requests`. POST + Content-Type variants may be generated in memory as part of the same family, but the final pre-queue safety gate rejects them in Safe Mode before they can be sent.
 
 ### Active Methods — explicit per target
 Use:
 
 `Bypass 403 Forbidden (Active Methods...)`
 
-Burp shows a warning before enabling this mode. The researcher must confirm that the target is authorized and that state-changing side effects are understood. Active mode can include `POST`, `PUT`, `PATCH`, `DELETE`, `TRACE`, `CONNECT`, and method-override requests.
+Burp shows a warning before enabling this mode. The researcher must confirm that the target is authorized and that state-changing side effects are understood. Active mode can include `POST`, `PUT`, `PATCH`, `DELETE`, `TRACE`, `CONNECT`, method-override requests, and the POST-based Content-Type header variants.
 
 Active Methods permission applies only to the currently selected target and is intentionally reset when the extension loads or unloads. Cancelling the confirmation keeps Safe Mode active.
 
@@ -108,7 +111,7 @@ Tests Unicode and encoded path variants that may be normalized differently by fr
 Tests backslash-based path variants relevant to stacks that normalize separators differently.
 
 ### 8. Method Tampering & Overrides
-Tests alternate methods and method-override headers. This category is Active-Methods-only in v8 Slice 4. Informational method responses are still analyzed conservatively rather than being called bypasses solely because they return `2xx`.
+Tests alternate methods and method-override headers. This category is Active-Methods-only in v8. Informational method responses are still analyzed conservatively rather than being called bypasses solely because they return `2xx`.
 
 ### 9. Protocol Variants
 Tests request-version mutations. Protocol behavior should still be manually validated because the HTTP stack can normalize requests before transmission.
@@ -117,7 +120,9 @@ Tests request-version mutations. Protocol behavior should still be manually vali
 Tests file-extension, query, fragment-style, and path-suffix variations.
 
 ### 11. Header Injection / Routing Hints
-Tests forwarding scheme/port headers, Host variants, content types, Accept variants, and related routing hints. The current category also contains POST-based Content-Type variants, so the whole category is gated behind Active Methods until the generator is split into safe and active subfamilies. This is a conservative safety choice, not a claim that every header mutation is state-changing.
+Tests forwarding scheme/port headers, Host variants, content types, Accept variants, and related routing hints.
+
+In Safe Mode, header-only requests that preserve `GET`, `HEAD`, or `OPTIONS` can run normally. The four POST + Content-Type mutations are rejected by the final pre-queue method gate. In Active Methods mode, those POST variants become eligible as well.
 
 ---
 
