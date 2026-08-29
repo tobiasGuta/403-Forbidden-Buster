@@ -19,11 +19,26 @@ public class BypassResult {
     private final int confidence;
     private final double bodySimilarity;
     private final String rationale;
+    private final HttpRequestResponse controlRequestResponse;
+    private final boolean controlCompared;
+    private final int controlStatus;
+    private final double controlSimilarity;
 
     public BypassResult(int id, String method, String url, String technique, String category,
                         int status, int length, HttpRequestResponse requestResponse,
                         ResponseAnalyzer.ResultType classification, int confidence,
                         double bodySimilarity, String rationale) {
+        this(id, method, url, technique, category, status, length, requestResponse,
+                classification, confidence, bodySimilarity, rationale,
+                null, false, -1, -1.0);
+    }
+
+    public BypassResult(int id, String method, String url, String technique, String category,
+                        int status, int length, HttpRequestResponse requestResponse,
+                        ResponseAnalyzer.ResultType classification, int confidence,
+                        double bodySimilarity, String rationale,
+                        HttpRequestResponse controlRequestResponse, boolean controlCompared,
+                        int controlStatus, double controlSimilarity) {
         this.id = id;
         this.method = method;
         this.url = url;
@@ -36,6 +51,10 @@ public class BypassResult {
         this.confidence = confidence;
         this.bodySimilarity = bodySimilarity;
         this.rationale = rationale;
+        this.controlRequestResponse = controlRequestResponse;
+        this.controlCompared = controlCompared;
+        this.controlStatus = controlStatus;
+        this.controlSimilarity = controlSimilarity;
     }
 
     public int getId() { return id; }
@@ -50,6 +69,10 @@ public class BypassResult {
     public int getConfidence() { return confidence; }
     public double getBodySimilarity() { return bodySimilarity; }
     public String getRationale() { return rationale; }
+    public HttpRequestResponse getControlRequestResponse() { return controlRequestResponse; }
+    public boolean isControlCompared() { return controlCompared; }
+    public int getControlStatus() { return controlStatus; }
+    public double getControlSimilarity() { return controlSimilarity; }
 
     /**
      * High-signal rows are candidates or redirects, never automatically confirmed vulnerabilities.
