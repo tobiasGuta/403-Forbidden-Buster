@@ -14,7 +14,7 @@ Version 8 is accuracy-, safety-, and evidence-focused. A status change alone is 
 ---
 
 ## Key Features
-* **150+ Bypass Techniques:** Automated fuzzing with header poisoning, path obfuscation, method tampering, protocol variants, Unicode normalization, backslash tricks, and more.
+* **150+ Bypass Techniques:** Automated fuzzing with header poisoning, path obfuscation, method tampering, Unicode normalization, backslash tricks, routing variants, and more. Experimental protocol-representation variants are clearly labeled and disabled by default.
 * **Safe Mode by Default:** Automatic transmission is limited to GET/HEAD/OPTIONS technique families. Non-allowlisted methods are gated behind an explicit per-target confirmation and are never persisted as the default.
 * **Safe Header Injection Coverage:** Forwarding, Host, Accept, and related header-only mutations remain available in Safe Mode, while POST Content-Type variants are filtered before queueing unless Active Methods is explicitly enabled.
 * **Calibrated Baselines:** Safe GET targets are replayed before fuzzing to learn normal response variance and reject stale authorization baselines.
@@ -29,6 +29,7 @@ Version 8 is accuracy-, safety-, and evidence-focused. A status change alone is 
 * **Evidence-Rich CSV Export:** Export classification, confidence, similarities, repeatability, and rationales for reporting and further analysis.
 * **Global Rate Limiting:** Enforced across baseline calibration, paired controls, candidate revalidation, and attack requests.
 * **Persistent Configuration:** Ordinary scan settings are saved across Burp restarts. Active Methods permission is intentionally not persisted.
+* **Release Trust Gate:** v8 includes a manual Burp smoke-test checklist (`V8_SMOKE_TEST.md`) that must pass before the release is considered ready.
 
 ---
 
@@ -50,6 +51,7 @@ The extension follows a modular architecture with clean separation of concerns:
 | `CandidateRevalidation.java` | Scores safe replay consistency and adjusts candidate classification/confidence based on repeatability |
 | `MontoyaResponseEvidence.java` | Caches the calibrated Burp-native semantic baseline profile and records response-variation/keyword evidence |
 | `ResponseAnalyzer.java` | Authoritative custom baseline/control scorer, body normalization, redirect `Location` comparison, and false-positive reduction |
+| `V8_SMOKE_TEST.md` | Manual release gate for traffic safety, false positives, Burp runtime behavior, evidence quality, and final sign-off |
 
 ---
 
@@ -117,8 +119,12 @@ Tests backslash-based path variants relevant to stacks that normalize separators
 ### 8. Method Tampering & Overrides
 Tests alternate methods and method-override headers. This category is Active-Methods-only in v8. Informational method responses are still analyzed conservatively rather than being called bypasses solely because they return `2xx`.
 
-### 9. Protocol Variants
-Tests request-version mutations. Protocol behavior should still be manually validated because the HTTP stack can normalize requests before transmission.
+### 9. Protocol Representation Variants — Experimental
+This family modifies the HTTP-version token in Burp's request representation before constructing a new Montoya request. It is **disabled by default** and the UI labels it **Experimental**.
+
+Burp owns the HTTP transport stack and can normalize the representation before transmission. Therefore, a result from this family must **not** be described as a verified HTTP/0.9 or HTTP/1.0 wire downgrade unless the actual network behavior has been independently observed and confirmed. The technique description itself states that Burp may normalize the request on send.
+
+This family is retained as an explicitly experimental research aid, not as trustworthy proof of protocol downgrade behavior.
 
 ### 10. Suffix Attacks
 Tests file-extension, query, fragment-style, and path-suffix variations.
@@ -243,6 +249,8 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
    * Go to **Extensions** → **Installed**.
    * Click **Add** and select `build/libs/ForbiddenBuster.jar`.
 
+Generated `build/` and `.gradle/` directories are intentionally ignored by Git and are not source-controlled. Release binaries should be built from a recorded commit and published as release artifacts rather than committed into the source tree.
+
 ---
 
 ## Quick Start
@@ -274,6 +282,26 @@ Confidence is an evidence score for triage, not a vulnerability severity score a
 | **Execution profile** | Safe Mode | Safe / per-target Active opt-in | Controls whether non-GET/HEAD/OPTIONS families are eligible |
 | **Request Delay (ms)** | `50` | 0–2000 in UI | Global delay between transmitted requests |
 | **Threads** | `5` | 1–50 | Number of concurrent attack workers |
+| **Protocol Representation Variants** | Off | Experimental | Alters the request representation token only; Burp may normalize actual wire protocol behavior |
+
+---
+
+## Release Trust Gate
+
+Before v8 is marked ready for release, run the exact candidate JAR through [`V8_SMOKE_TEST.md`](V8_SMOKE_TEST.md). The checklist covers:
+
+- extension load/defaults and non-persistent Active Methods state;
+- calibrated baseline stability and abort behavior;
+- path-swap and Host/routing false-positive controls;
+- `3/3`, `2/3`, and `1/3` candidate repeatability;
+- redirect `Location` handling, including login redirects and raw query encoding;
+- Safe Mode request boundaries;
+- Pause/Resume/Stop and global rate limiting;
+- Candidate / Control / Evidence UI behavior and CSV export;
+- Montoya semantic evidence without additional HTTP traffic;
+- optional experimental protocol-representation verification.
+
+The Draft PR should not be marked ready until required smoke-test sections pass or every exception is explicitly understood and accepted.
 
 ---
 
