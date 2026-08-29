@@ -2,19 +2,20 @@
 
 This checklist is the release gate for v8. It is intentionally focused on trust: false-positive resistance, traffic safety, evidence quality, and Burp runtime behavior. A green CI build is required, but CI alone is not enough to mark the release ready.
 
-## Release candidate record
+> **Recorded result (2026-08-29): PASS.** The exact tested RC, manual results, evidence checks, accepted non-blocking observations, and release-blocker review are recorded in [`V8_RELEASE_VALIDATION.md`](V8_RELEASE_VALIDATION.md). The tested source commit is `800b359234888c6019c538961fb25bd4289b5d10` and the tested JAR SHA-256 is `6444de5fdfc7cc0c0e336ff4305680b01a9a618cbfb0ab23f367900813de1ccb`.
 
-Fill this in before testing:
+## Release candidate record
 
 | Field | Value |
 | :--- | :--- |
 | Branch | `feat/v8-accuracy-engine` |
-| Commit SHA | |
-| JAR SHA-256 | |
-| Burp edition/version | |
-| Java version | |
-| Test date | |
-| Tester | |
+| Tested source commit | `800b359234888c6019c538961fb25bd4289b5d10` |
+| Tested JAR SHA-256 | `6444de5fdfc7cc0c0e336ff4305680b01a9a618cbfb0ab23f367900813de1ccb` |
+| Burp edition/version | Community Edition `v2026.7.3` |
+| Java version | Java 17 (build/CI) |
+| Test date | `2026-08-29` |
+| Tester | `tobiasGuta` |
+| Manual verdict | **PASS** |
 
 Build the exact candidate under test with:
 
@@ -36,7 +37,7 @@ Load only `ForbiddenBuster/build/libs/ForbiddenBuster.jar` produced from the rec
 ## A. Extension load and defaults
 
 | ID | Test | Expected result | Pass/Fail | Notes |
-| :--- | :--- | :--- | :--- | :--- | :--- |
+| :--- | :--- | :--- | :--- | :--- |
 | A1 | Load the JAR into Burp | Extension loads without exceptions and identifies itself as v8 | | |
 | A2 | Open Configuration | Safe defaults are visible; Protocol Representation Variants are marked **Experimental** | | |
 | A3 | Fresh settings/profile | Experimental protocol variants are disabled by default | | |
@@ -157,7 +158,7 @@ This section is optional for v8 release acceptance because the feature is disabl
 
 ## L. Release gate
 
-Do not mark PR #1 ready for review until all required sections A–J pass or every failure is explicitly understood and accepted.
+The recorded manual release decision is **PASS**. See `V8_RELEASE_VALIDATION.md` for the exact evidence and the distinction between directly exercised scenarios and overlapping/automated coverage.
 
 Release blockers include:
 
@@ -174,10 +175,11 @@ Final sign-off:
 
 | Gate | Result |
 | :--- | :--- |
-| Automated CI green on exact RC commit | |
-| Required manual smoke tests pass | |
-| No unresolved release-blocking false positive | |
-| No unresolved Safe Mode traffic escape | |
-| Evidence UI/CSV manually inspected | |
-| Experimental protocol wording verified | |
-| Ready to mark Draft PR ready for review | |
+| Automated CI green on exact tested RC commit | **PASS** — run #134 on `800b359234888c6019c538961fb25bd4289b5d10` |
+| Required manual smoke validation | **PASS** — recorded in `V8_RELEASE_VALIDATION.md` |
+| No unresolved release-blocking false positive | **PASS** |
+| No unresolved Safe Mode traffic escape | **PASS** |
+| Stop barrier network check | **PASS** |
+| Evidence UI/CSV manually inspected | **PASS** |
+| Experimental protocol wording verified | **PASS** — wire-level downgrade is not claimed |
+| Ready to mark Draft PR ready for review | **PASS after CI is green on the documentation-only validation commit** |
