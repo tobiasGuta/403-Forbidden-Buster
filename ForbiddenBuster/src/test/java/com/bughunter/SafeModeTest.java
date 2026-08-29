@@ -26,6 +26,7 @@ class SafeModeTest {
         assertFalse(RequestSafetyPolicy.isSafeAutomaticMethod("DELETE"));
         assertFalse(RequestSafetyPolicy.isSafeAutomaticMethod("TRACE"));
         assertFalse(RequestSafetyPolicy.isSafeAutomaticMethod("CONNECT"));
+        assertFalse(RequestSafetyPolicy.isSafeAutomaticMethod("PROPFIND"));
         assertFalse(RequestSafetyPolicy.isSafeAutomaticMethod(null));
     }
 
@@ -40,6 +41,13 @@ class SafeModeTest {
 
         assertTrue(config.isIpSpoofing());
         assertTrue(config.isPathSwapping());
+        assertTrue(config.isHopByHop());
+        assertTrue(config.isPathObfuscation());
+        assertTrue(config.isProtocolDowngrade());
+        assertTrue(config.isSuffixAttacks());
+        assertTrue(config.isCaseSwitch());
+        assertTrue(config.isUnicodeNormalization());
+        assertTrue(config.isBackslashBypass());
         assertFalse(config.isMethodTampering());
         assertFalse(config.isHeaderInjection());
         assertTrue(config.validate().isEmpty());
@@ -66,6 +74,13 @@ class SafeModeTest {
 
         assertFalse(config.isIpSpoofing());
         assertFalse(config.isPathSwapping());
+        assertFalse(config.isHopByHop());
+        assertFalse(config.isPathObfuscation());
+        assertFalse(config.isProtocolDowngrade());
+        assertFalse(config.isSuffixAttacks());
+        assertFalse(config.isCaseSwitch());
+        assertFalse(config.isUnicodeNormalization());
+        assertFalse(config.isBackslashBypass());
         assertFalse(config.isMethodTampering());
         assertFalse(config.isHeaderInjection());
 
@@ -88,17 +103,17 @@ class SafeModeTest {
                                        boolean headerInjection) {
         return new AttackConfig(
                 ipSpoofing,
-                true,   // path swapping
-                true,   // hop-by-hop
-                true,   // path obfuscation
+                true,
+                true,
+                true,
                 methodTampering,
-                true,   // protocol variants
-                true,   // suffix attacks
+                true,
+                true,
                 false,
                 false,
-                true,   // case switching
-                true,   // unicode normalization
-                true,   // backslash
+                true,
+                true,
+                true,
                 headerInjection,
                 50,
                 5,
