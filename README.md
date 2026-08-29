@@ -62,7 +62,7 @@ Safe Mode permits automatic technique families only when the selected target met
 
 Method Tampering remains fully Active-Methods-only because it intentionally creates alternate verbs and method-override payloads.
 
-Header Injection is split at the execution boundary. Header-only mutations that preserve an allowlisted method remain available, including forwarding scheme/port headers, Host variants, Accept variants, and `Upgrade-Insecure-Requests`. POST + Content-Type variants may be generated in memory as part of the same family, but the final pre-queue safety gate rejects them in Safe Mode before they can be sent.
+Header Injection is split at the execution boundary. Header-only mutations that preserve an allowlisted method remain available, including forwarding scheme/port headers, Host variants, Accept variants, and `Upgrade-Insecure-Requests`. POST + Content-Type variants may be generated in memory as part of the same family, but the final pre-queue safety gate rejects them in Safe Mode before they can be transmitted.
 
 ### Active Methods — explicit per target
 Use:
