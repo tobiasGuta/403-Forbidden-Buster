@@ -1,5 +1,7 @@
 package com.bughunter;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -13,7 +15,8 @@ import java.util.regex.Pattern;
  *
  * A status transition alone is never treated as proof of an authorization bypass.
  * The analyzer combines status, method semantics, normalized body similarity,
- * denial-marker behavior, baseline variance, paired controls, and body-length changes.
+ * denial-marker behavior, baseline variance, paired controls, redirect targets,
+ * and body-length changes.
  */
 public class ResponseAnalyzer {
 
@@ -29,6 +32,20 @@ public class ResponseAnalyzer {
             "permission denied",
             "authentication required",
             "insufficient privileges"
+    };
+
+    private static final String[] AUTH_REDIRECT_MARKERS = {
+            "/login",
+            "/signin",
+            "/sign-in",
+            "/auth",
+            "/oauth",
+            "/sso",
+            "/saml",
+            "access-denied",
+            "access_denied",
+            "forbidden",
+            "unauthorized"
     };
 
     private static final Pattern HTML_TAGS = Pattern.compile("<[^>]+>");
@@ -63,11 +80,6 @@ public class ResponseAnalyzer {
         addBaselineData(baselineLength, baselineBody);
     }
 
-    /**
-     * Adds another unchanged baseline response. Returns false if its status does
-     * not match the original baseline, because mixing authorization states would
-     * make later comparisons unreliable.
-     */
     public boolean addBaselineSample(short status, int length, String body) {
         if (status != baselineStatus) return false;
         addBaselineData(length, body);
@@ -82,11 +94,17 @@ public class ResponseAnalyzer {
         baselineHasDenialMarker = baselineHasDenialMarker || containsDenialMarker(normalized);
     }
 
-    /**
-     * Analyze one mutated response against the calibrated denied baseline.
-     */
     public Analysis analyze(String requestMethod, short status, int length, String body,
                             boolean hide404, boolean hide403) {
+        return analyze(requestMethod, status, length, body, "", hide404, hide403);
+    }
+
+    /**
+     * Analyze one mutated response against the calibrated denied baseline.
+     * Location is optional and only affects redirect triage.
+     */
+    public Analysis analyze(String requestMethod, short status, int length, String body,
+                            String location, boolean hide404, boolean hide403) {
         if ((hide404 && status == 404) || (hide403 && status == 403)) {
             return analysis(ResultType.NORMAL, 0, 1.0, false,
                     "Filtered by user configuration", false);
@@ -126,7 +144,19 @@ public class ResponseAnalyzer {
             confidence = Math.min(45, 15 + (similarity < 0.70 ? 15 : 0)
                     + (denialMarkerDisappeared ? 10 : 0)
                     + (significantLengthDifference ? 5 : 0));
-            rationale = "Redirect from a denied baseline; destination must be inspected manually";
+
+            String normalizedLocation = normalizeLocation(location);
+            if (normalizedLocation.isEmpty()) {
+                confidence = Math.min(confidence, 20);
+                rationale = "Redirect from denied baseline has no usable Location; manual inspection required";
+            } else if (isAuthenticationOrDenialLocation(normalizedLocation)) {
+                confidence = Math.min(confidence, 15);
+                rationale = "Redirect points to an authentication/denial-like destination: " + normalizedLocation;
+            } else {
+                confidence = Math.min(50, confidence + 5);
+                rationale = "Redirect from denied baseline to " + normalizedLocation
+                        + "; destination requires manual authorization validation";
+            }
         } else if (status != baselineStatus) {
             type = ResultType.STATUS_ANOMALY;
             confidence = 15;
@@ -149,29 +179,38 @@ public class ResponseAnalyzer {
                 significantLengthDifference, rationale, shouldLog);
     }
 
-    /**
-     * Analyze a mutation against both the denied baseline and a neutral paired
-     * control. Controls may neutralize a routing header or preserve a routing
-     * mutation while moving to a synthetic non-target path. Either way, a
-     * candidate that matches the control is evidence of routing-surface behavior,
-     * not protected-resource access.
-     */
     public Analysis analyzeWithControl(String requestMethod,
                                        short status, int length, String body,
                                        short controlStatus, int controlLength, String controlBody,
                                        boolean hide404, boolean hide403) {
+        return analyzeWithControl(
+                requestMethod,
+                status, length, body, "",
+                controlStatus, controlLength, controlBody, "",
+                hide404, hide403
+        );
+    }
+
+    /**
+     * Analyze a mutation against both the denied baseline and a neutral paired
+     * control. Redirects compare Location explicitly, so empty 3xx bodies no
+     * longer prevent the control engine from suppressing identical redirects.
+     */
+    public Analysis analyzeWithControl(String requestMethod,
+                                       short status, int length, String body, String location,
+                                       short controlStatus, int controlLength, String controlBody, String controlLocation,
+                                       boolean hide404, boolean hide403) {
         Analysis baselineAnalysis = analyze(
-                requestMethod, status, length, body, hide404, hide403
+                requestMethod, status, length, body, location, hide404, hide403
         );
 
         double controlSimilarity = bodySimilarity(controlBody, body);
         boolean controlLengthDifference = isSignificantAgainst(controlLength, length);
         boolean sameControlStatus = status == controlStatus;
         String method = normalizeMethod(requestMethod);
+        String normalizedLocation = normalizeLocation(location);
+        String normalizedControlLocation = normalizeLocation(controlLocation);
 
-        // A 2xx mutation that is effectively identical to its neutral control is
-        // not evidence of protected-resource access. This catches ignored routing
-        // signals as well as generic/default-vhost and catch-all responses.
         if (status >= 200 && status < 300
                 && controlStatus >= 200 && controlStatus < 300
                 && sameControlStatus
@@ -190,13 +229,29 @@ public class ResponseAnalyzer {
             );
         }
 
+        // Redirect bodies are commonly empty, so Location is the primary control
+        // invariant. Same status + same non-empty destination is strong noise.
+        if (status >= 300 && status < 400
+                && controlStatus >= 300 && controlStatus < 400
+                && sameControlStatus
+                && locationsEquivalent(normalizedLocation, normalizedControlLocation)) {
+            return new Analysis(
+                    ResultType.CONTROL_MATCH,
+                    0,
+                    baselineAnalysis.bodySimilarity(),
+                    baselineAnalysis.significantLengthDifference(),
+                    "Redirect destination matches paired control: " + normalizedLocation,
+                    false,
+                    true,
+                    controlSimilarity,
+                    controlStatus
+            );
+        }
+
         ResultType type = baselineAnalysis.type();
         int confidence = baselineAnalysis.confidence();
         String rationale = baselineAnalysis.rationale();
 
-        // For ordinary 2xx methods, a response that differs from the neutral
-        // control is positive differential evidence. Conversely, a near-match
-        // reduces confidence even when it is not similar enough to suppress.
         if (baselineStatus >= 400 && status >= 200 && status < 300
                 && !INFORMATIONAL_METHODS.contains(method)) {
             if (controlStatus < 200 || controlStatus >= 300) confidence += 20;
@@ -216,16 +271,32 @@ public class ResponseAnalyzer {
                 type = ResultType.STATUS_ANOMALY;
             }
         } else if (type == ResultType.REDIRECT) {
-            // Do not suppress redirects from body similarity alone because the
-            // Location header is not part of the v8 comparator yet.
-            if (!sameControlStatus) confidence += 10;
-            if (controlSimilarity < 0.70) confidence += 10;
-            confidence = Math.min(55, clamp(confidence));
+            boolean candidateDenialLike = isAuthenticationOrDenialLocation(normalizedLocation);
+            boolean controlDenialLike = isAuthenticationOrDenialLocation(normalizedControlLocation);
+
+            if (candidateDenialLike) {
+                confidence = Math.min(confidence, 15);
+            } else {
+                if (!normalizedLocation.isEmpty() && !normalizedControlLocation.isEmpty()
+                        && !locationsEquivalent(normalizedLocation, normalizedControlLocation)) {
+                    confidence += 15;
+                }
+                if (controlDenialLike && !candidateDenialLike) confidence += 10;
+                if (!sameControlStatus) confidence += 5;
+                if (controlSimilarity < 0.70) confidence += 5;
+                confidence = Math.min(55, clamp(confidence));
+            }
+
+            rationale = rationale
+                    + "; paired redirect Location=" + displayLocation(normalizedLocation)
+                    + ", control Location=" + displayLocation(normalizedControlLocation);
         }
 
-        rationale = rationale
-                + "; paired control status=" + controlStatus
-                + ", body similarity=" + Math.round(controlSimilarity * 100.0) + "%";
+        if (type != ResultType.REDIRECT) {
+            rationale = rationale
+                    + "; paired control status=" + controlStatus
+                    + ", body similarity=" + Math.round(controlSimilarity * 100.0) + "%";
+        }
 
         return new Analysis(
                 type,
@@ -256,24 +327,14 @@ public class ResponseAnalyzer {
         );
     }
 
-    /**
-     * Retained for compatibility with older callers.
-     */
     public boolean shouldLog(short status, int length, boolean hide404, boolean hide403) {
         return analyze(baselineMethod, status, length, "", hide404, hide403).shouldLog();
     }
 
-    /**
-     * Retained for compatibility with older callers.
-     */
     public ResultType classify(short status, int length) {
         return analyze(baselineMethod, status, length, "", false, false).type();
     }
 
-    /**
-     * A candidate length is considered anomalous only when it falls outside the
-     * tolerated range of every captured baseline sample.
-     */
     public boolean isSignificantLengthDifference(int length) {
         for (int sampleLength : baselineLengths) {
             if (!isSignificantAgainst(sampleLength, length)) {
@@ -390,6 +451,60 @@ public class ResponseAnalyzer {
         Set<String> union = new HashSet<>(leftTokens);
         union.addAll(rightTokens);
         return union.isEmpty() ? 1.0 : (double) intersection.size() / union.size();
+    }
+
+    static String normalizeLocation(String location) {
+        if (location == null || location.isBlank()) return "";
+        String trimmed = location.trim();
+
+        try {
+            URI uri = new URI(trimmed).normalize();
+            String scheme = uri.getScheme() == null ? null : uri.getScheme().toLowerCase(Locale.ROOT);
+            String host = uri.getHost() == null ? null : uri.getHost().toLowerCase(Locale.ROOT);
+            int port = uri.getPort();
+            if (("http".equals(scheme) && port == 80) || ("https".equals(scheme) && port == 443)) {
+                port = -1;
+            }
+
+            String path = uri.getRawPath();
+            if ((scheme != null || host != null) && (path == null || path.isEmpty())) path = "/";
+
+            URI normalized = new URI(
+                    scheme,
+                    uri.getRawUserInfo(),
+                    host,
+                    port,
+                    path,
+                    uri.getRawQuery(),
+                    null
+            );
+            String value = normalized.toString();
+            if (!value.isBlank()) return value;
+        } catch (URISyntaxException ignored) {
+            // Fall back to a conservative string normalization below.
+        }
+
+        int fragment = trimmed.indexOf('#');
+        return (fragment >= 0 ? trimmed.substring(0, fragment) : trimmed).trim();
+    }
+
+    static boolean locationsEquivalent(String left, String right) {
+        String normalizedLeft = normalizeLocation(left);
+        String normalizedRight = normalizeLocation(right);
+        return !normalizedLeft.isEmpty() && normalizedLeft.equals(normalizedRight);
+    }
+
+    static boolean isAuthenticationOrDenialLocation(String location) {
+        String normalized = normalizeLocation(location).toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) return false;
+        for (String marker : AUTH_REDIRECT_MARKERS) {
+            if (normalized.contains(marker)) return true;
+        }
+        return false;
+    }
+
+    private static String displayLocation(String location) {
+        return location == null || location.isBlank() ? "<missing>" : location;
     }
 
     public enum ResultType {
