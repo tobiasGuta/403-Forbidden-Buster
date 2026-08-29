@@ -38,8 +38,16 @@ final class PairedControlPlanner {
 
     private PairedControlPlanner() {}
 
-    static Plan plan(HttpRequestResponse baseline, PayloadGenerator.Payload payload) {
-        if (!RequestSafetyPolicy.isAllowedByCurrentMode(payload.request.method())) {
+    /**
+     * Plan a payload using the execution mode captured when this attack run was
+     * created. The mutable ActiveMethodsRegistry is intentionally not consulted
+     * here: changing the context-menu mode for another target must never change
+     * the safety boundary of a run that is already calibrating or executing.
+     */
+    static Plan plan(HttpRequestResponse baseline,
+                     PayloadGenerator.Payload payload,
+                     boolean activeMethodsEnabled) {
+        if (!isAllowedByRunMode(payload.request.method(), activeMethodsEnabled)) {
             return Plan.skip(
                     "Safe Mode blocked non-allowlisted method " + payload.request.method()
             );
@@ -55,6 +63,10 @@ final class PairedControlPlanner {
         }
 
         return Plan.none();
+    }
+
+    static boolean isAllowedByRunMode(String method, boolean activeMethodsEnabled) {
+        return RequestSafetyPolicy.isAllowedByMode(method, activeMethodsEnabled);
     }
 
     private static Plan planPathSwap(HttpRequestResponse baseline, PayloadGenerator.Payload payload) {
