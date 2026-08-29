@@ -15,10 +15,26 @@ class PairedControlPlannerTest {
     }
 
     @Test
+    void harmlessSurroundingWhitespaceDoesNotChangeTargetIdentity() {
+        assertTrue(PairedControlPlanner.sameSemanticTarget(
+                "/admin",
+                "  /admin  "
+        ));
+    }
+
+    @Test
     void dictionaryTargetCannotMasqueradeAsProtectedTarget() {
         assertFalse(PairedControlPlanner.sameSemanticTarget(
                 "/secret-company-admin",
                 "/login"
+        ));
+    }
+
+    @Test
+    void queryDifferenceIsARealSemanticTargetDifference() {
+        assertFalse(PairedControlPlanner.sameSemanticTarget(
+                "/admin?view=users",
+                "/admin?view=settings"
         ));
     }
 
